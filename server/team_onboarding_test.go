@@ -74,6 +74,8 @@ func TestOnboardingAPIIsolationAndAdvice(t *testing.T) {
 	}
 	env := teamsetup.Environment{OS: "linux", Arch: "amd64", WSL: true, Distro: "PRIVATE-DISTRO", Addresses: []teamsetup.Address{{IP: "192.168.50.4", Interface: "PRIVATE-IFACE", CIDR: "192.168.50.0/24"}}}
 	s.teamAccess = teamsetup.New(ctx, filepath.Join(t.TempDir(), "access"), t.TempDir(), BuildVersion, env, false, s.TeamHandler())
+	detections := 0
+	s.teamDetectEnvironment = func(context.Context) teamsetup.Environment { detections++; return env }
 	defer s.teamAccess.Close()
 	admin, _ := signJWT(s.jwtKey)
 	member, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{Subject: fmt.Sprintf("team:%d:%d", team.ID, one.ID), ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}).SignedString(s.jwtKey)
@@ -99,7 +101,7 @@ func TestOnboardingAPIIsolationAndAdvice(t *testing.T) {
 	if json.Unmarshal(got.Body.Bytes(), &status) != nil || len(status.Devices) != 1 || len(status.Environment.Addresses) != 0 {
 		t.Fatalf("member scope: %s", got.Body)
 	}
-	for _, route := range []string{"plan", "apply", "disable", "assist", "host-script"} {
+	for _, route := range []string{"plan", "apply", "disable", "assist", "host-script", "refresh"} {
 		method := "POST"
 		if route == "host-script" {
 			method = "GET"
@@ -108,6 +110,13 @@ func TestOnboardingAPIIsolationAndAdvice(t *testing.T) {
 		if got.Code != 403 {
 			t.Fatalf("member %s: %d", route, got.Code)
 		}
+	}
+	if detections != 0 {
+		t.Fatal("status polling or a denied member request ran host detection")
+	}
+	got = call("POST", base+"/refresh", admin, `{}`)
+	if got.Code != 200 || detections != 1 || s.teamAccess.State().Enabled {
+		t.Fatalf("refresh: %d %s; detections=%d", got.Code, got.Body, detections)
 	}
 	got = call("POST", base+"/apply", admin, `{"confirm":false}`)
 	if got.Code != 400 {
@@ -119,6 +128,19 @@ func TestOnboardingAPIIsolationAndAdvice(t *testing.T) {
 	}
 	if s.teamAccess.State().Enabled {
 		t.Fatal("plan started listener")
+	}
+	var prepared teamsetup.Plan
+	if err := json.Unmarshal(got.Body.Bytes(), &prepared); err != nil {
+		t.Fatal(err)
+	}
+	// The network changes after preview, before the explicit apply request.
+	env.Addresses = []teamsetup.Address{{IP: "192.168.60.4", CIDR: "192.168.60.0/24"}}
+	got = call("POST", base+"/apply", admin, fmt.Sprintf(`{"confirm":true,"plan_id":%q}`, prepared.ID))
+	if got.Code != 409 || !strings.Contains(got.Body.String(), "网卡地址已变化") || s.teamAccess.State().Enabled {
+		t.Fatalf("stale network plan applied: %d %s", got.Code, got.Body)
+	}
+	if s.teamAccess.Environment().Addresses[0].IP != "192.168.60.4" {
+		t.Fatal("explicit action did not update cached addresses")
 	}
 	p := &onboardingCapture{text: `{"summary":"已检查固定事实","steps":["确认接入地址"],"recommended_action":"prepare"}`}
 	s.cfgMu.Lock()

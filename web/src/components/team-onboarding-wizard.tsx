@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { reconcileOnboardingInput } from "@/lib/team-onboarding-input";
 
 type Address = { ip: string; interface: string; cidr: string; host: boolean };
 type Device = { id: number; name: string; online: boolean; execution_enabled: boolean; branch_protocol: number; role_count: number };
@@ -67,26 +68,31 @@ export function TeamOnboardingWizard({ team, admin }: { team: string; admin: boo
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState("");
   const [notice, setNotice] = React.useState("");
-  const [bindIP, setBindIP] = React.useState("");
-  const [publicIP, setPublicIP] = React.useState("");
+  const [networkInput, setNetworkInput] = React.useState({ bindIP: "", publicIP: "", allowedCIDR: "" });
+  const publicAddressEdited = React.useRef(false);
+  const { bindIP, publicIP, allowedCIDR } = networkInput;
+  const setBindIP = (value: string) => setNetworkInput((old) => ({ ...old, bindIP: value }));
+  const setPublicIP = (value: string) => { publicAddressEdited.current = true; setNetworkInput((old) => ({ ...old, publicIP: value })); };
+  const setAllowedCIDR = (value: string) => setNetworkInput((old) => ({ ...old, allowedCIDR: value }));
   const [port, setPort] = React.useState("8789");
-  const [allowedCIDR, setAllowedCIDR] = React.useState("");
   const [plan, setPlan] = React.useState<Plan | null>(null);
   const [issue, setIssue] = React.useState<(typeof issueOptions)[number][0]>("explain");
   const [assist, setAssist] = React.useState<Assist | null>(null);
   const [platform, setPlatform] = React.useState("");
   const [pairingCode, setPairingCode] = React.useState("");
 
-  const refresh = React.useCallback(async () => {
+  const refresh = React.useCallback(async (redetect = false) => {
     setLoading(true); setError("");
+    if (redetect) { setBusy(true); setPlan(null); setNotice(""); }
     try {
+      if (redetect && admin) {
+        await http(`${teamPath(team)}/refresh`, { method: "POST" });
+        setNotice("已重新检测网卡。失效地址和网段会更新为当前候选值；请核对后重新预览并确认方案。此操作没有修改入口、桥接或防火墙。");
+      }
       const result = await http<Onboarding>(teamPath(team));
       setData(result);
-      const local = result.environment.addresses.find((a) => !a.host);
-      const published = result.environment.addresses.find((a) => a.host) ?? local;
-      setBindIP((old) => old || local?.ip || "");
-      setPublicIP((old) => old || published?.ip || "");
-      setAllowedCIDR((old) => old || published?.cidr || "");
+      const preferHost = !publicAddressEdited.current;
+      setNetworkInput((old) => reconcileOnboardingInput(old, result.environment.addresses, result.environment.wsl, preferHost));
       const preferredPlatform = navigator.userAgent.includes("Windows") ? "windows-amd64" : navigator.userAgent.includes("Mac") ? "darwin-arm64" : "linux-amd64";
       setPlatform((old) => old || (result.platforms.includes(preferredPlatform) ? preferredPlatform : result.platforms[0]) || "");
       if (admin) {
@@ -97,9 +103,9 @@ export function TeamOnboardingWizard({ team, admin }: { team: string; admin: boo
         setMemberID(workspace.member_id);
       }
     } catch (e) { setError((e as Error).message); }
-    finally { setLoading(false); }
+    finally { setLoading(false); if (redetect) setBusy(false); }
   }, [admin, team]);
-  React.useEffect(() => { void refresh(); }, [refresh]);
+  React.useEffect(() => { publicAddressEdited.current = false; setNetworkInput({bindIP:"",publicIP:"",allowedCIDR:""}); setPlan(null); void refresh(); }, [refresh]);
   React.useEffect(() => {
     if (!pairingCode) return;
     const timer = window.setTimeout(() => setPairingCode(""), 600000);
@@ -153,10 +159,10 @@ export function TeamOnboardingWizard({ team, admin }: { team: string; admin: boo
   return <Card>
     <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3 space-y-0">
       <div><CardTitle>跨设备接入向导</CardTitle><p className="mt-1 text-sm text-muted-foreground">准备主端 → 成员运行接入包 → 核对设备。地址和网段会根据本机环境预填。</p></div>
-      <Button type="button" variant="outline" disabled={busy || loading} onClick={() => void refresh()}>刷新状态</Button>
+      <Button type="button" variant="outline" disabled={busy || loading} onClick={() => void refresh(admin && !data?.state.external)}>{loading ? "正在检测…" : admin && !data?.state.external ? "重新检测网络并刷新" : "刷新状态"}</Button>
     </CardHeader>
     <CardContent className="space-y-5">
-      {error && <p role="alert" className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">{error} <Button className="ml-2" variant="outline" size="sm" disabled={busy} onClick={() => void refresh()}>重试</Button></p>}
+      {error && <p role="alert" className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">{error} <Button className="ml-2" variant="outline" size="sm" disabled={busy || loading} onClick={() => void refresh(admin && !data?.state.external)}>重新检测并重试</Button></p>}
       {notice && <p role="status" className="rounded-md border border-primary/30 bg-primary/5 p-3 text-sm">{notice}</p>}
       {loading && !data ? <p role="status" className="text-sm text-muted-foreground">正在读取接入状态…</p> : null}
       {!loading && !data && !error && <p className="text-sm text-muted-foreground">当前账号没有可用的接入信息。</p>}
@@ -168,6 +174,7 @@ export function TeamOnboardingWizard({ team, admin }: { team: string; admin: boo
           {state?.enabled && <dl className="grid gap-2 rounded-md border p-3 text-sm sm:grid-cols-2"><div><dt className="text-muted-foreground">成员地址</dt><dd className="break-all font-mono">{state.origin || "未发布"}</dd></div><div><dt className="text-muted-foreground">监听地址 / 网段</dt><dd className="break-all font-mono">{state.listen_address || "未知"}{state.allowed_cidr ? ` · ${state.allowed_cidr}` : ""}</dd></div><div><dt className="text-muted-foreground">TLS 指纹</dt><dd className="break-all font-mono">{state.fingerprint || "未知"}</dd></div><div><dt className="text-muted-foreground">有效期</dt><dd>{state.expires_at || "由协调端管理"}</dd></div></dl>}
           {state?.error && <p role="alert" className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">{state.error}</p>}
           <p className="text-xs text-muted-foreground">检测环境：{data.environment.os} · {data.environment.arch}{data.environment.wsl ? ` · WSL${data.environment.distro ? ` (${data.environment.distro})` : ""}` : ""}</p>
+          {admin && data.environment.wsl && !data.environment.addresses.some((address) => address.host) && <p role="status" className="rounded-md border p-3 text-sm">尚未检测到 Windows 联网网卡。点击“重新检测网络并刷新”后再选择成员地址；WSL 内部地址通常不能直接供另一台设备访问。</p>}
           {state?.needs_host_bridge && <p className="rounded-md border border-amber-500/40 p-3 text-sm">检测到 WSL 主机桥接需求。下载脚本仅供预览；请交由 Windows 管理员审阅并使用 <code>-Apply</code> 执行。该脚本不会由 AI 生成。</p>}
           <div className="grid gap-2 md:grid-cols-2">{data.checks.map((check) => <div key={check.code} className="flex items-start justify-between gap-3 rounded-md border p-3 text-sm"><div><p className="font-medium">{check.title}</p><p className="mt-1 text-muted-foreground">{check.detail}</p></div><Badge className="shrink-0" variant={statusLabel(check.status) === "需处理" ? "destructive" : "outline"}>{statusLabel(check.status)}</Badge></div>)}</div>
         </section>

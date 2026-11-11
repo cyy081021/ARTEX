@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Autumn-27/artex/teamsetup"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -27,7 +28,21 @@ func TestTeamOnboardingBrowserPreview(t *testing.T) {
 	}
 	s, task, _ := workflowFixture(t)
 	ctx := context.Background()
-	if strings.Contains(os.Getenv("ARTEX_PG_DSN"), "dbname=onboarding_preview") {
+	if os.Getenv("ARTEX_ONBOARDING_REFRESH_FIXTURE") == "1" {
+		accessDir := t.TempDir()
+		old := []byte(`{"enabled":true,"input":{"bind_ip":"172.20.1.2","public_ip":"192.168.1.3","port":18789,"allowed_cidr":"192.168.1.0/24"}}`)
+		if err := os.WriteFile(filepath.Join(accessDir, "access.json"), old, 0600); err != nil {
+			t.Fatal(err)
+		}
+		env := teamsetup.Environment{OS: "linux", Arch: "amd64", WSL: true, Distro: "isolated fixture", Addresses: []teamsetup.Address{{IP: "172.20.1.2", CIDR: "172.20.0.0/20", Interface: "fixture"}}}
+		s.teamAccess = teamsetup.New(ctx, accessDir, os.Getenv("ARTEX_NODE_BUNDLE_DIR"), BuildVersion, env, false, s.TeamHandler())
+		defer s.teamAccess.Close()
+		s.teamDetectEnvironment = func(context.Context) teamsetup.Environment {
+			current := env
+			current.Addresses = append(append([]teamsetup.Address{}, env.Addresses...), teamsetup.Address{IP: "192.168.2.3", CIDR: "192.168.2.0/24", Host: true, Interface: "Windows fixture"})
+			return current
+		}
+	} else if strings.Contains(os.Getenv("ARTEX_PG_DSN"), "dbname=onboarding_preview") {
 		closeAccess := s.ConfigureTeamOnboarding(ctx, s.m.dir, os.Getenv("ARTEX_NODE_BUNDLE_DIR"), false)
 		defer closeAccess()
 	}

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -235,5 +236,115 @@ func TestRestoreInvalidSettingsDoesNotListen(t *testing.T) {
 	c.restore(context.Background())
 	if c.State().Enabled || c.State().Error == "" {
 		t.Fatal("invalid saved config not reported")
+	}
+}
+
+func TestRefreshEnvironmentInvalidatesOnlyChangedPlans(t *testing.T) {
+	c := testController(t)
+	base := c.Environment()
+	base.Addresses = append(base.Addresses, Address{IP: "192.168.51.4", CIDR: "192.168.51.0/24"})
+	if changed, err := c.RefreshEnvironment(base); err != nil || !changed {
+		t.Fatalf("initial environment refresh = changed %v, err %v", changed, err)
+	}
+	p, err := c.Prepare(1, testInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Reordering an otherwise identical interface list must preserve previews.
+	same := c.Environment()
+	same.Addresses[0], same.Addresses[1] = same.Addresses[1], same.Addresses[0]
+	if changed, err := c.RefreshEnvironment(same); err != nil || changed {
+		t.Fatalf("reordered refresh = changed %v, err %v", changed, err)
+	}
+	if _, ok := c.plans[p.ID]; !ok {
+		t.Fatal("unchanged environment invalidated plan")
+	}
+
+	// A real address change invalidates old previews; new addresses are usable.
+	p, err = c.Prepare(1, testInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := Environment{OS: "linux", Arch: "amd64", Addresses: []Address{{IP: "192.168.70.4", CIDR: "192.168.70.0/24"}}}
+	if changed, err := c.RefreshEnvironment(next); err != nil || !changed {
+		t.Fatalf("changed environment refresh = changed %v, err %v", changed, err)
+	}
+	if _, err := c.Apply(t.Context(), 1, p.ID); err == nil {
+		t.Fatal("old preview survived changed environment")
+	}
+	in := testInput()
+	in.BindIP, in.PublicIP, in.AllowedCIDR = "192.168.70.4", "192.168.70.4", "192.168.70.0/24"
+	if _, err := c.Prepare(1, in); err != nil {
+		t.Fatalf("new address could not be previewed: %v", err)
+	}
+}
+
+func TestRefreshEnvironmentCopiesSlicesAndRejectsExternalMode(t *testing.T) {
+	c := testController(t)
+	input := Environment{OS: "linux", Arch: "amd64", Addresses: []Address{{IP: "192.168.70.4", CIDR: "192.168.70.0/24"}}}
+	if _, err := c.RefreshEnvironment(input); err != nil {
+		t.Fatal(err)
+	}
+	input.Addresses[0].IP = "192.168.99.99"
+	got := c.Environment()
+	if got.Addresses[0].IP != "192.168.70.4" {
+		t.Fatalf("controller retained caller slice: %+v", got)
+	}
+	got.Addresses[0].IP = "192.168.88.88"
+	if c.Environment().Addresses[0].IP != "192.168.70.4" {
+		t.Fatal("Environment exposed controller slice")
+	}
+
+	c.external = true
+	if changed, err := c.RefreshEnvironment(Environment{OS: "windows"}); err == nil || changed {
+		t.Fatalf("external refresh = changed %v, err %v", changed, err)
+	}
+	if c.Environment().OS != "linux" {
+		t.Fatal("external refresh changed environment")
+	}
+}
+
+func TestRefreshEnvironmentDoesNotTouchActiveEntry(t *testing.T) {
+	c := testController(t)
+	s := enableTestController(t, c)
+	saved, err := os.ReadFile(filepath.Join(c.dir, "access.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := c.server
+	changed, err := c.RefreshEnvironment(Environment{OS: "linux", Arch: "amd64", Addresses: []Address{{IP: "192.168.70.4", CIDR: "192.168.70.0/24"}}})
+	if err != nil || !changed {
+		t.Fatalf("refresh = changed %v, err %v", changed, err)
+	}
+	if c.server != server || !c.State().Enabled || c.State().ListenAddress != s.ListenAddress {
+		t.Fatal("refresh changed active listener state")
+	}
+	after, err := os.ReadFile(filepath.Join(c.dir, "access.json"))
+	if err != nil || !bytes.Equal(saved, after) {
+		t.Fatal("refresh changed persisted access config")
+	}
+	conn, err := net.DialTimeout("tcp", s.ListenAddress, time.Second)
+	if err != nil {
+		t.Fatalf("refresh closed active listener: %v", err)
+	}
+	conn.Close()
+}
+
+func TestRefreshEnvironmentDoesNotListenOrPersist(t *testing.T) {
+	c := testController(t)
+	called := false
+	c.listen = func(string, string) (net.Listener, error) {
+		called = true
+		return nil, errors.New("unexpected listen")
+	}
+	if _, err := c.RefreshEnvironment(Environment{OS: "linux", Arch: "amd64", Addresses: []Address{{IP: "192.168.70.4", CIDR: "192.168.70.0/24"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("refresh opened a listener")
+	}
+	if _, err := os.Stat(c.dir); !os.IsNotExist(err) {
+		t.Fatal("refresh persisted state")
 	}
 }

@@ -31,7 +31,9 @@ func Detect(ctx context.Context) Environment {
 	}
 	if e.WSL {
 		// Constant read-only command: no request data or configuration is interpolated.
-		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		// PowerShell networking modules can take more than five seconds on a cold
+		// Windows/WSL start. Detection runs only on startup or explicit admin actions.
+		readCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		output, err := exec.CommandContext(readCtx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", `[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $ErrorActionPreference='Stop'; $active=@(Get-NetIPConfiguration | Where-Object { $_.NetAdapter.Status -eq 'Up' -and $_.IPv4DefaultGateway } | ForEach-Object { $_.InterfaceIndex }); ConvertTo-Json -Compress -InputObject @(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.AddressState -eq 'Preferred' -and $active -contains $_.InterfaceIndex -and $_.InterfaceAlias -notmatch 'Loopback|vEthernet|WSL' } | Select-Object IPAddress,PrefixLength,InterfaceAlias)`).Output()
 		if err == nil && len(output) < 65536 {

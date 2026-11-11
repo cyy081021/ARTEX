@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -80,6 +81,57 @@ func (c *Controller) Environment() Environment {
 	e.Addresses = append([]Address{}, e.Addresses...)
 	return e
 }
+
+// RefreshEnvironment replaces the detected local environment. Callers should
+// run Detect only for an explicit user action; ordinary status reads must use
+// Environment so platform-specific detection is not repeated while polling.
+// A changed environment invalidates every preview because its address choices
+// and host-bridge details were based on the previous interface set.
+func (c *Controller) RefreshEnvironment(env Environment) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.external {
+		return false, errors.New("入口由启动参数管理，请使用高级手动配置")
+	}
+	env.Addresses = append([]Address{}, env.Addresses...)
+	if environmentsEqual(c.env, env) {
+		return false, nil
+	}
+	c.env = env
+	c.plans = map[string]preparedPlan{}
+	return true, nil
+}
+
+func environmentsEqual(a, b Environment) bool {
+	if a.OS != b.OS || a.Arch != b.Arch || a.Distro != b.Distro || a.WSL != b.WSL || len(a.Addresses) != len(b.Addresses) {
+		return false
+	}
+	addresses := func(in []Address) []Address {
+		out := append([]Address{}, in...)
+		sort.Slice(out, func(i, j int) bool {
+			x, y := out[i], out[j]
+			if x.IP != y.IP {
+				return x.IP < y.IP
+			}
+			if x.Interface != y.Interface {
+				return x.Interface < y.Interface
+			}
+			if x.CIDR != y.CIDR {
+				return x.CIDR < y.CIDR
+			}
+			return !x.Host && y.Host
+		})
+		return out
+	}
+	left, right := addresses(a.Addresses), addresses(b.Addresses)
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Controller) State() State { c.mu.Lock(); defer c.mu.Unlock(); return c.state }
 func (c *Controller) validate(in Input) (bool, error) {
 	if in.Port < 1024 || in.Port > 65535 {

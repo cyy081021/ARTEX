@@ -119,11 +119,12 @@ type Server struct {
 
 	// Cold task archives run through one persistent FIFO worker. The buffered wake
 	// channel coalesces enqueue bursts; the database remains the source of truth.
-	archiveWake  chan struct{}
-	archiveWG    sync.WaitGroup
-	side         *sideQuestionState
-	teamAccess   *teamsetup.Controller // configured once, before accepting HTTP requests
-	onboardingAI sync.Mutex
+	archiveWake           chan struct{}
+	archiveWG             sync.WaitGroup
+	side                  *sideQuestionState
+	teamAccess            *teamsetup.Controller                       // configured once, before accepting HTTP requests
+	teamDetectEnvironment func(context.Context) teamsetup.Environment // optional test detector; configured before serving
+	onboardingAI          sync.Mutex
 }
 
 // provEntry is a cached provider + its config for one LLM profile id.

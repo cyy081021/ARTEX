@@ -22,6 +22,7 @@ func (s *Server) ConfigureTeamOnboarding(ctx context.Context, dataDir, binaryDir
 }
 func (s *Server) teamOnboardingRoutes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/teams/{team}/onboarding", s.onboardingStatus)
+	m.HandleFunc("POST /api/teams/{team}/onboarding/refresh", s.onboardingRefresh)
 	m.HandleFunc("POST /api/teams/{team}/onboarding/plan", s.onboardingPlan)
 	m.HandleFunc("POST /api/teams/{team}/onboarding/apply", s.onboardingApply)
 	m.HandleFunc("POST /api/teams/{team}/onboarding/disable", s.onboardingDisable)
@@ -158,6 +159,10 @@ func (s *Server) onboardingPlan(w http.ResponseWriter, r *http.Request) {
 	if !onboardingDecode(w, r, &in) {
 		return
 	}
+	if _, err := s.refreshOnboardingEnvironment(r.Context()); err != nil {
+		writeErr(w, 409, err.Error())
+		return
+	}
 	plan, err := s.teamAccess.Prepare(team, in)
 	if err != nil {
 		writeErr(w, 400, err.Error())
@@ -181,12 +186,45 @@ func (s *Server) onboardingApply(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "请先确认接入方案")
 		return
 	}
+	changed, err := s.refreshOnboardingEnvironment(r.Context())
+	if err != nil {
+		writeErr(w, 409, err.Error())
+		return
+	}
+	if changed {
+		writeErr(w, 409, "网卡地址已变化，旧方案已失效；请重新检测并预览方案")
+		return
+	}
 	state, err := s.teamAccess.Apply(r.Context(), team, in.PlanID)
 	if err != nil {
 		writeErr(w, 409, err.Error())
 		return
 	}
 	writeJSON(w, 200, state)
+}
+
+// Detection is explicit and admin-only. Status polling never runs host commands.
+func (s *Server) refreshOnboardingEnvironment(ctx context.Context) (bool, error) {
+	if s.teamAccess.State().External {
+		return false, errors.New("入口由启动参数管理，请使用高级手动配置")
+	}
+	detect := s.teamDetectEnvironment
+	if detect == nil {
+		detect = teamsetup.Detect
+	}
+	return s.teamAccess.RefreshEnvironment(detect(ctx))
+}
+
+func (s *Server) onboardingRefresh(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := s.onboardingScope(w, r, true); !ok {
+		return
+	}
+	changed, err := s.refreshOnboardingEnvironment(r.Context())
+	if err != nil {
+		writeErr(w, 409, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"changed": changed, "environment": s.teamAccess.Environment()})
 }
 func (s *Server) onboardingDisable(w http.ResponseWriter, r *http.Request) {
 	_, _, ok := s.onboardingScope(w, r, true)
