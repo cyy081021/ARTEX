@@ -102,43 +102,30 @@ export function TeamSessionWorkspace({ team, taskId }: { team: string; taskId: s
   };
   return (
     <section className="space-y-3 rounded-md border p-3" aria-label="共享会话消息">
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-sm font-medium">共享会话</h3>
-        {!canSteer && <p className="w-full text-xs text-muted-foreground">{error ? "会话状态未能更新，暂时停用发送；连接恢复后会重新核对权限。" : "发送引导需要此任务的执行权限；当前账号可查看共享消息。"}</p>}
-        <div className="flex gap-1" role="group" aria-label="筛选共享会话">
-          <Button type="button" size="sm" variant={filter === "all" ? "secondary" : "ghost"} aria-pressed={filter === "all"} className="min-h-11" onClick={() => chooseFilter("all")}>全部</Button>
-          <Button type="button" size="sm" variant={filter === "sendable" ? "secondary" : "ghost"} aria-pressed={filter === "sendable"} className="min-h-11" onClick={() => chooseFilter("sendable")}>可发送</Button>
-          <Button type="button" size="sm" variant={filter === "readonly" ? "secondary" : "ghost"} aria-pressed={filter === "readonly"} className="min-h-11" onClick={() => chooseFilter("readonly")}>只读</Button>
-        </div>
-        <label className="sr-only" htmlFor="team-session-select">
-          选择共享会话
-        </label>
-        <select
-          id="team-session-select"
-          className="ml-auto min-h-11 max-w-full rounded-md border bg-background px-2 text-sm"
-          value={sessionID}
-          onChange={(event) => { sessionIDRef.current = event.target.value; setSessionID(event.target.value); }}
-          disabled={!filteredSessions.length && !currentIsFiltered}
-        >
-          {!filteredSessions.length && <option value="">暂无符合条件的共享会话</option>}
-          {currentIsFiltered && session && <option value={session.id}>当前会话（已不符合筛选） · {teamSessionWorkerLabel(session.id)}</option>}
-          {filteredSessions.map((item) => (
-            <option key={item.id} value={item.id}>
-              {teamSessionWorkerLabel(item.id)} · {item.title || item.id} · {teamSessionStateLabel(item.state)} · {canSteer && item.can_message ? "可发送" : "只读"}
-            </option>
-          ))}
-        </select>
-      </div>
       {error && (
         <p role="alert" className="text-xs text-destructive">
           会话列表读取失败：{error}
         </p>
       )}
-      {session ? (
-        <TeamSessionMessages team={team} taskId={taskId} session={session} canSteer={canSteer} />
-      ) : (
-        <p className="text-sm text-muted-foreground">当前任务还没有可查看的共享会话。</p>
-      )}
+      {!canSteer && <p className="text-xs text-muted-foreground">{error ? "会话状态未能更新，暂时停用发送；连接恢复后会重新核对权限。" : "发送引导需要此任务的执行权限；当前账号可查看共享消息。"}</p>}
+      <div className="grid min-h-80 gap-3 md:grid-cols-[minmax(14rem,0.32fr)_minmax(0,1fr)]">
+        <aside className="space-y-2 rounded-md bg-muted/30 p-2" aria-label="会话列表">
+          <h3 className="px-2 text-sm font-medium">共享会话</h3>
+          <div className="flex flex-wrap gap-1" role="group" aria-label="筛选共享会话">
+            <Button type="button" size="sm" variant={filter === "all" ? "secondary" : "ghost"} aria-pressed={filter === "all"} className="min-h-9" onClick={() => chooseFilter("all")}>全部</Button>
+            <Button type="button" size="sm" variant={filter === "sendable" ? "secondary" : "ghost"} aria-pressed={filter === "sendable"} className="min-h-9" onClick={() => chooseFilter("sendable")}>可发送</Button>
+            <Button type="button" size="sm" variant={filter === "readonly" ? "secondary" : "ghost"} aria-pressed={filter === "readonly"} className="min-h-9" onClick={() => chooseFilter("readonly")}>只读</Button>
+          </div>
+          <div className="max-h-[32rem] space-y-1 overflow-y-auto">
+            {currentIsFiltered && session && <button type="button" className="w-full rounded-md border bg-background p-2 text-left text-sm" onClick={() => { sessionIDRef.current = session.id; setSessionID(session.id); }}><span className="block font-medium">{teamSessionWorkerLabel(session.id)}</span><span className="block truncate text-xs text-muted-foreground">当前会话（不符合筛选）</span></button>}
+            {filteredSessions.map((item) => <button key={item.id} type="button" aria-current={item.id === sessionID ? "true" : undefined} className={`w-full rounded-md border p-2 text-left text-sm ${item.id === sessionID ? "bg-background shadow-sm" : "border-transparent hover:bg-background/70"}`} onClick={() => { sessionIDRef.current = item.id; setSessionID(item.id); }}><span className="block font-medium">{teamSessionWorkerLabel(item.id)} · {teamSessionStateLabel(item.state)}</span><span className="block truncate text-xs text-muted-foreground">{item.title || item.id} · {canSteer && item.can_message ? "可发送" : "只读"}</span><span className="block text-xs text-muted-foreground">执行端：{item.executor_id === 0 ? "本机" : `${item.executor_name || "设备"} #${item.executor_id}`}</span></button>)}
+            {!filteredSessions.length && !currentIsFiltered && <p className="px-2 py-3 text-xs text-muted-foreground">暂无符合条件的会话。</p>}
+          </div>
+        </aside>
+        <div className="min-w-0 rounded-md border p-3">
+          {session ? <TeamSessionMessages team={team} taskId={taskId} session={session} canSteer={canSteer} /> : <p className="text-sm text-muted-foreground">当前任务还没有可查看的共享会话。</p>}
+        </div>
+      </div>
     </section>
   );
 }

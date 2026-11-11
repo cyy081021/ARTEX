@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { http } from "@/lib/api";
+import { TeamBranchSetup } from "@/components/team-branch-setup";
 
 type Member = { id: number; login: string; revoked?: boolean };
 type Device = {
@@ -29,7 +30,9 @@ type BranchPolicy = {
   budget: number;
   max_tool_seconds: number;
   min_tool_interval_ms: number;
+  auto_dispatch?: boolean;
   auto_publish: boolean;
+  auto_review?: boolean;
   kinds: string[];
   assets: BranchAsset[];
   materials: Material[];
@@ -59,6 +62,8 @@ type Branch = {
   revision: number;
   state: string;
   reason?: string;
+  review_mode?: "automatic" | "manual";
+  review_reason?: string;
   spent: number;
   spec: {
     title: string;
@@ -121,7 +126,6 @@ type Snapshot = {
   cursor: number;
   has_more: boolean;
 };
-type EnableResponse = { project?: Snapshot["project"] };
 type CommandResponse = { receipt: { branch_id?: number; work_id?: number; unit_id?: number }; snapshot?: Snapshot };
 type WorkspaceDevices = { devices: Device[] };
 type Artifact = { id: number; name: string; size_bytes: number; sha256?: string };
@@ -156,6 +160,7 @@ const stateNames: Record<string, string> = {
   partial: "部分完成",
 };
 const kindName = (kind: string) => (kind === "reverse" ? "逆向" : "渗透");
+const branchStateName = (branch: Branch) => branch.review_mode === "automatic" && branch.state === "accepted" ? "自动接收" : branch.review_mode === "automatic" && branch.state === "review_pending" ? "待人工复审" : stateNames[branch.state] ?? branch.state;
 const commandPath = (team: string, taskId: number) => `/teams/${team}/tasks/${taskId}/branches/command`;
 const branchPath = (team: string, taskId: number) => `/teams/${team}/tasks/${taskId}/branches`;
 const controlClass = "min-h-10 w-full rounded-md border bg-background px-3 py-2 text-sm";
@@ -183,14 +188,6 @@ function parseAssets(text: string): BranchAsset[] {
       if (sep < 1) throw new Error("每个资产请按 id=授权目标 填写，每行一个。");
       return { id: line.slice(0, sep).trim(), target: line.slice(sep + 1).trim(), version: "1" };
     });
-}
-
-function parseCapabilities(text: string): string[] {
-  const values = text.split(",").map((value) => value.trim()).filter(Boolean);
-  if (values.some((value) => !/^[a-zA-Z0-9_-]{1,80}$/.test(value)) || new Set(values).size !== values.length) {
-    throw new Error("工具能力请用逗号分隔唯一的英文工具键，例如 read_material,inspect。");
-  }
-  return values;
 }
 
 function mergeSnapshots(current: Snapshot | null, incoming: Snapshot, append: boolean): Snapshot {
@@ -259,9 +256,9 @@ export function TeamBranches({
   admin,
   members,
   devices,
-  materials = [],
   canManage = admin,
   onModeChange,
+  viewMode = "all",
 }: {
   team: string;
   taskId: number;
@@ -272,13 +269,13 @@ export function TeamBranches({
   materials?: Artifact[];
   canManage?: boolean;
   onModeChange?: (enabled: boolean) => void;
+  viewMode?: "all" | "review";
 }) {
   const [snapshot, setSnapshot] = React.useState<Snapshot | null>(null);
   const data = snapshot?.project;
   const [enabled, setEnabled] = React.useState<boolean | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState(false);
-  const [expanded, setExpanded] = React.useState(false);
   const [poolForm, setPoolForm] = React.useState(false);
   const [policyForm, setPolicyForm] = React.useState(false);
   const [selectedBranch, setSelectedBranch] = React.useState(0);
@@ -291,7 +288,6 @@ export function TeamBranches({
   const [notice, setNotice] = React.useState("");
   const [updated, setUpdated] = React.useState("");
   const [ownDevices, setOwnDevices] = React.useState<Device[]>(devices ?? []);
-  const [includeDynamic, setIncludeDynamic] = React.useState(false);
   const [newWorkKind, setNewWorkKind] = React.useState("pentest");
   const [newWorkMaterials, setNewWorkMaterials] = React.useState<string[]>([]);
   const scope = `${team}:${taskId}`;
@@ -405,7 +401,7 @@ export function TeamBranches({
   const branchManage = admin || permissions.has("manage");
   const manage = branchManage;
   const canEnable = branchManage || canManage;
-  const visibleBranches = (data?.branches ?? []).filter((branch) => branchFilter === "all" || admin || branch.owner_id === memberID || branch.contributors.includes(memberID));
+  const visibleBranches = (data?.branches ?? []).filter((branch) => viewMode === "review" ? ["review_pending", "needs_supplement"].includes(branch.state) : branchFilter === "all" || admin || branch.owner_id === memberID || branch.contributors.includes(memberID));
   const activeBranch = visibleBranches.find((branch) => branch.id === selectedBranch) ?? visibleBranches[0];
   const usableMembers = members.filter((m) => !m.revoked);
   const ownedDevices = ownDevices.filter((d) => !d.revoked && d.owner_member_id === memberID && (!d.capabilities || d.capabilities.execution_enabled !== false));
@@ -508,68 +504,6 @@ export function TeamBranches({
     }
   }
 
-  async function enableBranches(form: HTMLFormElement) {
-    if (busy) return;
-    const formData = new FormData(form);
-    let assets: BranchAsset[];
-    try {
-      assets = parseAssets(String(formData.get("assets") ?? ""));
-    } catch (error) {
-      setActionError((error as Error).message);
-      return;
-    }
-    const kinds = ["pentest", "reverse"].filter((kind) => formData.get(`kind-${kind}`) === "on");
-    if (!kinds.length) {
-      setActionError("至少选择一种工作类型。");
-      return;
-    }
-    const artifactIDs = (formData.getAll("artifact_ids") as string[]).map(Number).filter(Number.isFinite);
-    const dynamicEnabled = formData.get("allow-dynamic-role") === "on";
-    let roleCapabilities: Record<string, string[]>;
-    try {
-      roleCapabilities = {
-        ...(kinds.includes("pentest") ? { worker: parseCapabilities(String(formData.get("caps-worker") ?? "")), reviewer: ["read_material"] } : {}),
-        ...(kinds.includes("reverse") ? {
-          reverse_static: parseCapabilities(String(formData.get("caps-reverse-static") ?? "")),
-          reverse_reviewer: ["read_material"],
-          ...(dynamicEnabled ? { reverse_dynamic: parseCapabilities(String(formData.get("caps-reverse-dynamic") ?? "")) } : {}),
-        } : {}),
-      };
-    } catch (error) {
-      setActionError((error as Error).message);
-      return;
-    }
-    const policy: Omit<BranchPolicy, "materials"> = {
-      goal: String(formData.get("goal") ?? "").trim(),
-      budget: Number(formData.get("budget")),
-      max_tool_seconds: Number(formData.get("max_tool_seconds")),
-      min_tool_interval_ms: Number(formData.get("min_tool_interval_ms")),
-      auto_publish: formData.get("auto_publish") === "on",
-      kinds,
-      assets,
-    };
-    const requestedScope = scope;
-    setBusy(true);
-    setActionError("");
-    setNotice("");
-    try {
-      await http<EnableResponse>(`${base}/enable`, {
-        method: "POST",
-        body: JSON.stringify({ policy, artifact_ids: artifactIDs, role_capabilities: roleCapabilities }),
-      });
-      if (scopeRef.current !== requestedScope) return;
-      setEnabled(true);
-      setNotice("执行分支协作已启用；主任务仍保持原有身份与状态。");
-      setExpanded(false);
-      mutationVersion.current++;
-      await refreshNow();
-    } catch (error) {
-      if (scopeRef.current === requestedScope) setActionError((error as Error).message);
-    } finally {
-      if (scopeRef.current === requestedScope) setBusy(false);
-    }
-  }
-
   async function exportEvents() {
     try {
       let result: Snapshot | null = null;
@@ -608,7 +542,7 @@ export function TeamBranches({
       <CardHeader className="gap-2">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1">
-            <CardTitle id={`branches-title-${taskId}`}>执行分支协作（可选）</CardTitle>
+            <CardTitle id={`branches-title-${taskId}`}>{viewMode === "review" ? "待人工复审" : "执行分支协作（可选）"}</CardTitle>
             <p className="max-w-3xl text-sm text-muted-foreground">
               在同一主任务下拆分独立工作上下文。每个分支保留自己的计划、执行记录和复核状态；分支复核不会自动结束主任务。
             </p>
@@ -626,86 +560,35 @@ export function TeamBranches({
         {actionError && <p role="alert" className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">{actionError}</p>}
         {notice && <p role="status" className="text-sm">{notice}</p>}
         {loading && enabled === null && <p role="status" className="text-sm text-muted-foreground">正在检查分支协作状态…</p>}
-        {enabled === false && (
+        {enabled === false && viewMode === "all" && (
           <div className="space-y-3 rounded-md border p-4">
             <p className="text-sm text-muted-foreground">此共享任务尚未启用执行分支协作。启用需要管理员或任务管理权限，启用不会复制任务，也不会自动启动执行。</p>
             {canEnable ? (
-              <>
-                <Button type="button" variant="outline" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
-                  {expanded ? "收起设置" : "设置并启用分支协作"}
-                </Button>
-                {expanded && (
-                  <form className="space-y-4 border-t pt-4" onSubmit={(event) => { event.preventDefault(); void enableBranches(event.currentTarget); }}>
-                    <div className="grid gap-4 md:grid-cols-2">
-                      <div className="space-y-2">
-                        <Label htmlFor={`branch-goal-${taskId}`}>协作目标（留空时使用主任务目标）</Label>
-                        <Textarea id={`branch-goal-${taskId}`} name="goal" rows={2} maxLength={8192} disabled={busy} />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor={`branch-assets-${taskId}`}>允许资产（每行一个 id=目标）</Label>
-                        <Textarea id={`branch-assets-${taskId}`} name="assets" rows={3} required placeholder={'asset-1=https://example.test\nartifact-2=local artifact'} disabled={busy} />
-                  <p className="text-xs text-muted-foreground">填写此主任务已授权的资产；启用后按此范围约束分支执行。</p>
-                      </div>
-                    </div>
-                    <div className="grid gap-4 sm:grid-cols-3">
-                      <div className="space-y-2"><Label htmlFor={`branch-budget-${taskId}`}>总额度（请求与工具次数）</Label><Input id={`branch-budget-${taskId}`} name="budget" type="number" min={1} max={1000000} defaultValue={100} required disabled={busy} /></div>
-                      <div className="space-y-2"><Label htmlFor={`branch-seconds-${taskId}`}>单工具最长秒数</Label><Input id={`branch-seconds-${taskId}`} name="max_tool_seconds" type="number" min={1} max={60} defaultValue={60} required disabled={busy} /></div>
-                      <div className="space-y-2"><Label htmlFor={`branch-interval-${taskId}`}>工具调用最小间隔（毫秒）</Label><Input id={`branch-interval-${taskId}`} name="min_tool_interval_ms" type="number" min={0} max={60000} defaultValue={0} required disabled={busy} /><p className="text-xs text-muted-foreground">只限制工具调用频率，不限制内部 HTTP 请求。</p></div>
-                      <fieldset className="space-y-2">
-                        <legend className="text-sm font-medium">允许工作类型</legend>
-                        <label className="flex min-h-10 items-center gap-2 text-sm"><input type="checkbox" name="kind-pentest" defaultChecked disabled={busy} />渗透</label>
-                        <label className="flex min-h-10 items-center gap-2 text-sm"><input type="checkbox" name="kind-reverse" disabled={busy} />逆向</label>
-                        <label className="flex min-h-10 items-center gap-2 text-sm"><input type="checkbox" name="allow-dynamic-role" disabled={busy} />另行启用逆向动态观察角色</label>
-                      </fieldset>
-                    </div>
-                    <fieldset className="space-y-3 rounded-md border p-3">
-                      <legend className="px-1 text-sm font-medium">角色工具能力（需要时才填）</legend>
-                      <p className="text-xs text-muted-foreground">空白表示不授权额外工具能力。复核角色固定为只读材料能力；能力键会绑定在角色策略中。</p>
-                      <div className="grid gap-3 md:grid-cols-3">
-                        <div className="space-y-1"><Label htmlFor={`caps-worker-${taskId}`}>渗透执行角色</Label><Input id={`caps-worker-${taskId}`} name="caps-worker" placeholder="read_material,inspect" disabled={busy} /></div>
-                        <div className="space-y-1"><Label htmlFor={`caps-reverse-static-${taskId}`}>逆向静态角色</Label><Input id={`caps-reverse-static-${taskId}`} name="caps-reverse-static" placeholder="read_material,inspect_artifact" disabled={busy} /></div>
-                        <div className="space-y-1"><Label htmlFor={`caps-reverse-dynamic-${taskId}`}>逆向动态角色</Label><Input id={`caps-reverse-dynamic-${taskId}`} name="caps-reverse-dynamic" placeholder="read_material,observe_runtime" disabled={busy} /></div>
-                      </div>
-                    </fieldset>
-                    <fieldset className="space-y-2">
-                      <legend className="text-sm font-medium">固定给分支的主任务材料</legend>
-                          {materials.length === 0 ? (
-                        <p className="text-sm text-muted-foreground">当前没有可选材料。上传并登记主任务材料后再刷新。</p>
-                      ) : (
-                        <div className="grid gap-2 sm:grid-cols-2">
-                          {materials.map((material) => (
-                            <label key={material.id} className="flex min-h-10 items-center gap-2 rounded-md border px-3 text-sm">
-                              <input type="checkbox" name="artifact_ids" value={material.id} disabled={busy} />
-                              <span className="min-w-0 truncate">{material.name}</span>
-                              <span className="ml-auto shrink-0 text-xs text-muted-foreground">{material.size_bytes.toLocaleString()} B</span>
-                            </label>
-                          ))}
-                        </div>
-                      )}
-                    </fieldset>
-                    <label className="flex min-h-10 items-center gap-2 text-sm">
-                      <input type="checkbox" name="auto_publish" disabled={busy} />允许协调器自动发布工作单
-                    </label>
-                    <div className="flex flex-wrap gap-2">
-                      <Button disabled={busy || !canEnable}>{busy ? "正在启用…" : "启用分支协作"}</Button>
-                      <Button type="button" variant="outline" disabled={busy} onClick={() => setExpanded(false)}>取消</Button>
-                    </div>
-                  </form>
-                )}
-              </>
+              <TeamBranchSetup team={team} taskId={taskId} base={base} disabled={busy || loading} onEnabled={async () => {
+                setEnabled(true);
+                setNotice("协作配置已启用；主任务保持暂停，执行不会自动开始。请在协作工作台检查设备与分支状态后再决定是否启动。");
+                mutationVersion.current++;
+                await refreshNow();
+              }} />
             ) : (
               <p className="text-sm">启用状态由任务管理者设置。</p>
             )}
           </div>
         )}
 
+        {enabled === false && viewMode === "review" && <p className="rounded-md border p-3 text-sm text-muted-foreground">此任务尚未启用分支协作，因此没有待人工复审的分支。</p>}
         {enabled && data && snapshot && (
           <>
+            {viewMode === "all" && <>
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-muted/40 p-3 text-sm">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-muted-foreground">任务 {taskId} · {data.policy.kinds.map(kindName).join("、")}</span>
                 <Badge variant="secondary">总额度 {data.policy.budget}</Badge>
                 <Badge variant="outline">单工具 ≤ {data.policy.max_tool_seconds} 秒</Badge>
+                <Badge variant={data.state === "paused" ? "outline" : "secondary"}>{stateNames[data.state] ?? data.state}</Badge>
+                <Badge variant={data.policy.auto_dispatch ? "secondary" : "outline"}>自动派发{data.policy.auto_dispatch ? "开启" : "关闭"}</Badge>
+                <Badge variant={data.policy.auto_publish ? "secondary" : "outline"}>自动发布{data.policy.auto_publish ? "开启" : "关闭"}</Badge>
+                <Badge variant={data.policy.auto_review === false ? "outline" : "secondary"}>{data.policy.auto_review === false ? "人工复核" : "明确结果自动接收"}</Badge>
                 {[...permissions].map((permission) => <Badge key={permission} variant="outline">{permissionNames[permission] ?? permission}</Badge>)}
               </div>
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -713,6 +596,11 @@ export function TeamBranches({
                 {loading && <span role="status">更新中</span>}
               </div>
             </div>
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3">
+              <p className="text-sm text-muted-foreground">{data.state === "paused" ? "项目当前保持暂停。" : "协作正在运行。"} {data.policy.auto_dispatch ? "开始后会自动拆分工作、匹配空闲设备并按授权范围分配资产。" : "自动派发已关闭，需由管理者在高级管理中发布工作单。"} {data.policy.auto_publish ? "候选工作可自动发布。" : "自动发布已关闭，候选工作需管理者批准。"} {data.policy.auto_review === false ? "候选结果由成员人工复核。" : "明确结果自动接收，不明确结果转人工复审；不会自动完成主任务。"}</p>
+              {manage && <Button type="button" variant={data.state === "paused" ? "default" : "outline"} disabled={busy || data.state === "complete" || data.state === "partial"} onClick={() => void command(data.state === "paused" ? "project_resume" : "project_pause", { revision: data.revision }, data.state === "paused" ? (data.policy.auto_dispatch ? "协作已开始；系统将自动拆分、匹配空闲设备并分配授权资产。" : "协作已开始；自动派发关闭，请到高级管理手动发布工作单。") : "协作已暂停。")}>{data.state === "paused" ? "开始协作" : "暂停协作"}</Button>}
+            </div>
+            {(branchManage || manage) && <details className="rounded-md border p-3"><summary className="cursor-pointer font-medium">高级管理</summary><div className="mt-3 space-y-3">
             {branchManage && (
               <section className="space-y-3 rounded-md border p-4" aria-labelledby={`branch-permissions-heading-${taskId}`}>
                 <div>
@@ -738,13 +626,12 @@ export function TeamBranches({
                 </div>
               </section>
             )}
-            {data.policy.auto_publish && <p className="text-xs text-muted-foreground">协调器自动发布已允许；自动发布只生成可领取工作项，仍需成员认领、设备就绪并由管理者恢复主项目。</p>}
+            {data.policy.auto_publish && <p className="text-xs text-muted-foreground">协调器自动发布已允许；这只发布候选工作单，不会跳过权限和设备就绪检查。</p>}
             {manage && (
               <section className="space-y-3 rounded-md border p-4" aria-labelledby={`branch-pool-heading-${taskId}`}>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div><h3 id={`branch-pool-heading-${taskId}`} className="font-medium">工作池</h3><p className="text-xs text-muted-foreground">发布只创建候选工作项；成员领取后才建立分支上下文。</p></div>
                   <div className="flex gap-2">
-                    <Button type="button" size="sm" variant="outline" disabled={busy || data.state === "complete" || data.state === "partial"} onClick={() => void command(data.state === "paused" ? "project_resume" : "project_pause", { revision: data.revision }, data.state === "paused" ? "项目已恢复。" : "项目已暂停。")}>{data.state === "paused" ? "恢复项目" : "暂停项目"}</Button>
                     <Button type="button" size="sm" variant="outline" disabled={busy || data.state === "complete" || data.state === "partial"} onClick={() => { const note = window.prompt("填写项目关闭说明或未完成缺口"); if (note?.trim()) void command("close", { revision: data.revision, state: "partial", text: note.trim() }, "项目关闭请求已记录；系统会按必需分支复核状态标记完成或部分完成。"); }}>关闭项目</Button>
                     <Button type="button" size="sm" variant="outline" aria-expanded={poolForm} onClick={() => setPoolForm((value) => !value)}>{poolForm ? "收起发布表单" : "发布工作单"}</Button>
                   </div>
@@ -796,15 +683,18 @@ export function TeamBranches({
                 </div>
               </section>
             )}
+            </div></details>}
 
             {!manage && (data.pool ?? []).length > 0 && <section className="space-y-2"><h3 className="font-medium">可领取工作</h3>{data.pool.filter((work) => work.state === "published").map((work) => <article key={work.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3"><div><p className="font-medium">{work.spec.title}</p><p className="text-sm text-muted-foreground">{work.spec.question} · 预算 {work.spec.budget}</p></div><form className="flex gap-2" onSubmit={(event) => { event.preventDefault(); const deviceID = Number(new FormData(event.currentTarget).get("device_id")); void command("claim", { work_id: work.id, device_id: deviceID }, "已领取分支；等待设备就绪。"); }}><Label className="sr-only" htmlFor={`claim-member-device-${work.id}`}>选择自己的设备</Label><select id={`claim-member-device-${work.id}`} name="device_id" required className="min-h-10 max-w-56 rounded-md border bg-background px-3 text-sm" disabled={busy}><option value="">选择自己的设备</option>{ownedDevices.map((device) => <option key={device.id} value={device.id}>{device.name} · #{device.id}</option>)}</select><Button size="sm" disabled={busy || ownedDevices.length === 0}>领取</Button></form></article>)}</section>}
+            </>}
 
             <section className="space-y-3" aria-labelledby={`branch-list-heading-${taskId}`}>
-              <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 id={`branch-list-heading-${taskId}`} className="font-medium">执行分支</h3><p className="text-xs text-muted-foreground">每个分支属于主任务 {taskId}，拥有独立 epoch 与工作记录。</p></div><div className="flex items-center gap-2"><Label htmlFor={`branch-filter-${taskId}`} className="sr-only">分支范围</Label><select id={`branch-filter-${taskId}`} value={branchFilter} className="min-h-10 rounded-md border bg-background px-3 text-sm" onChange={(e) => setBranchFilter(e.target.value as "mine" | "all")}><option value="mine">我的分支</option><option value="all">全部可见分支</option></select></div></div>
-              {(data.branches ?? []).length === 0 ? <p className="rounded-md border p-4 text-sm text-muted-foreground">尚无已领取的执行分支。</p> : visibleBranches.length === 0 ? <p className="rounded-md border p-4 text-sm text-muted-foreground">当前筛选下没有可见分支。</p> : <div className="grid gap-3 lg:grid-cols-[minmax(16rem,0.8fr)_minmax(0,1.5fr)]">
+              <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 id={`branch-list-heading-${taskId}`} className="font-medium">{viewMode === "review" ? "待人工复审" : "执行分支"}</h3><p className="text-xs text-muted-foreground">{viewMode === "review" ? "仅显示待人工复审或需要补充的分支。" : `每个分支属于主任务 ${taskId}，拥有独立 epoch 与工作记录。`}</p></div>{viewMode === "all" && <div className="flex items-center gap-2"><Label htmlFor={`branch-filter-${taskId}`} className="sr-only">分支范围</Label><select id={`branch-filter-${taskId}`} value={branchFilter} className="min-h-10 rounded-md border bg-background px-3 text-sm" onChange={(e) => setBranchFilter(e.target.value as "mine" | "all")}><option value="mine">我的分支</option><option value="all">全部可见分支</option></select></div>}</div>
+              {(data.branches ?? []).length === 0 ? <p className="rounded-md border p-4 text-sm text-muted-foreground">{viewMode === "review" ? "目前没有待人工复审的分支。" : "尚无已领取的执行分支。"}</p> : visibleBranches.length === 0 ? <p className="rounded-md border p-4 text-sm text-muted-foreground">{viewMode === "review" ? "目前没有待人工复审的分支。" : "当前筛选下没有可见分支。"}</p> : <div className="grid gap-3 lg:grid-cols-[minmax(16rem,0.8fr)_minmax(0,1.5fr)]">
                 <div className="space-y-2">
                   {visibleBranches.map((branch) => <button key={branch.id} type="button" aria-pressed={activeBranch?.id === branch.id} onClick={() => setSelectedBranch(branch.id)} className={`w-full rounded-md border p-3 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${activeBranch?.id === branch.id ? "border-primary bg-muted/50" : ""}`}>
-                    <div className="flex flex-wrap items-center gap-2"><span className="font-medium">{branch.spec.title}</span><Badge variant="outline">{stateNames[branch.state] ?? branch.state}</Badge>{branch.spec.restricted && <Badge variant="secondary">受限可见</Badge>}</div>
+                    <div className="flex flex-wrap items-center gap-2"><span className="font-medium">{branch.spec.title}</span><Badge variant="outline">{branchStateName(branch)}</Badge>{branch.review_mode === "automatic" && <Badge variant="secondary">自动核验</Badge>}{branch.spec.restricted && <Badge variant="secondary">受限可见</Badge>}</div>
+                    {branch.review_reason && <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">核验说明：{branch.review_reason}</p>}
                     <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{branch.spec.question}</p>
                     <p className="mt-2 text-xs text-muted-foreground">主任务 #{branch.task_id} · 成员 {memberName(branch.owner_id)} · {deviceName(branch.device_id)} #{branch.device_id}</p>
                     <p className="mt-1 text-xs text-muted-foreground">额度 {branch.spent}/{branch.spec.budget} · epoch {branch.epoch} · 修订 {branch.revision}</p>
@@ -898,7 +788,7 @@ function BranchDetail({
 
   return <article className="min-w-0 space-y-4 rounded-md border p-4" aria-labelledby={`branch-detail-title-${branch.id}`}>
     <div className="flex flex-wrap items-start justify-between gap-3">
-      <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h4 id={`branch-detail-title-${branch.id}`} className="font-semibold">分支 #{branch.id} · {branch.spec.title}</h4><Badge variant="outline">{stateNames[branch.state] ?? branch.state}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{branch.spec.question}</p><p className="mt-2 text-xs text-muted-foreground">负责人 {memberName(branch.owner_id)} · 控制者 {memberName(branch.control_id)} · 设备 #{branch.device_id} {deviceName(branch.device_id)} · epoch {branch.epoch}</p>{branch.spec.restricted && <p className="mt-1 text-xs text-muted-foreground">受限分支仅对指定成员、贡献者和管理员可见。</p>}{branch.reason && <p className="mt-2 rounded-md bg-muted p-2 text-sm">阻塞说明：{branch.reason}</p>}</div>
+      <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h4 id={`branch-detail-title-${branch.id}`} className="font-semibold">分支 #{branch.id} · {branch.spec.title}</h4><Badge variant="outline">{branchStateName(branch)}</Badge>{branch.review_mode === "automatic" && <Badge variant="secondary">自动核验</Badge>}</div><p className="mt-1 text-sm text-muted-foreground">{branch.spec.question}</p><p className="mt-2 text-xs text-muted-foreground">负责人 {memberName(branch.owner_id)} · 控制者 {memberName(branch.control_id)} · 设备 #{branch.device_id} {deviceName(branch.device_id)} · epoch {branch.epoch}</p>{branch.review_reason && <p className="mt-2 rounded-md bg-muted/50 p-2 text-xs">核验说明：{branch.review_reason}</p>}{branch.spec.restricted && <p className="mt-1 text-xs text-muted-foreground">受限分支仅对指定成员、贡献者和管理员可见。</p>}{branch.reason && <p className="mt-2 rounded-md bg-muted p-2 text-sm">阻塞说明：{branch.reason}</p>}</div>
     </div>
     <div className="flex flex-wrap gap-2 text-xs"><Badge variant="secondary">已用 {branch.spent}/{branch.spec.budget}</Badge><Badge variant="outline">{branch.spec.kind === "reverse" ? "逆向" : "渗透"}</Badge><Badge variant="outline">工作单 {branch.units.length}</Badge><Badge variant="outline">成员 {branch.contributors.map(memberName).join("、") || memberName(branch.owner_id)}</Badge></div>
 

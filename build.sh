@@ -187,7 +187,7 @@ package_binary() {
   mkdir -p "$package_root/examples" "$package_root/docs"
   cp examples/team-node*.json "$package_root/examples/"
   cp examples/README.md "$package_root/examples/"
-  cp docs/team-onboarding.md docs/team-onboarding-validation.md docs/team-branches.md docs/team-shared-messages.md "$package_root/docs/"
+  cp docs/team-onboarding.md docs/team-onboarding-validation.md docs/team-branches.md docs/team-shared-messages.md docs/team-auto-collaboration.md "$package_root/docs/"
   # 守护启动脚本是正式入口：页面上的一键更新要靠它在进程退出后重新拉起，
   # 直接跑 artex 本体的话更新完就再也起不来了。按目标系统只带对应的那一份。
   if [ "$goos" = "windows" ]; then

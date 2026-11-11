@@ -19,6 +19,7 @@ import (
 )
 
 func (s *Server) teamBranchRoutes(m *http.ServeMux) {
+	m.HandleFunc("POST /api/teams/{team}/tasks/{task}/branches/setup", s.branchSetup)
 	m.HandleFunc("POST /api/teams/{team}/tasks/{task}/branches/enable", s.branchEnable)
 	m.HandleFunc("GET /api/teams/{team}/tasks/{task}/branches", s.branchSnapshot)
 	m.HandleFunc("POST /api/teams/{team}/tasks/{task}/branches/command", s.branchCommand)
@@ -114,6 +115,9 @@ func (s *Server) branchEnable(w http.ResponseWriter, r *http.Request) {
 		Policy           collab.BranchPolicy `json:"policy"`
 		ArtifactIDs      []int64             `json:"artifact_ids"`
 		RoleCapabilities map[string][]string `json:"role_capabilities"`
+		SetupToken       string              `json:"setup_token"`
+		SetupOptions     branchSetupOptions  `json:"setup_options"`
+		Confirm          bool                `json:"confirm"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if decode(r, &in) != nil {
@@ -146,6 +150,28 @@ func (s *Server) branchEnable(w http.ResponseWriter, r *http.Request) {
 	s.engine.liveMu.Unlock()
 	if busy {
 		writeErr(w, 409, "当前主 Agent 会话尚未结束")
+		return
+	}
+	sourceDigest := ""
+	if in.SetupToken != "" {
+		if !in.Confirm {
+			writeErr(w, 400, "请先核对自动配置并确认启用")
+			return
+		}
+		plan, err := s.confirmedBranchSetup(r, team, t.ID, p.MemberID, p.Admin, in.SetupToken, in.SetupOptions)
+		if err != nil {
+			branchError(w, err)
+			return
+		}
+		in.Policy = plan.policy
+		in.RoleCapabilities = nil
+		in.ArtifactIDs = nil
+		for _, material := range plan.Materials {
+			in.ArtifactIDs = append(in.ArtifactIDs, material.ID)
+		}
+		sourceDigest = plan.sourceDigest
+	} else if in.Confirm {
+		writeErr(w, 400, "请先生成并核对自动配置")
 		return
 	}
 	// Reuse role-specific configured prompts; never fall back across workflows.
@@ -262,7 +288,7 @@ func (s *Server) branchEnable(w http.ResponseWriter, r *http.Request) {
 		}
 		in.Policy.Materials = append(in.Policy.Materials, mat)
 	}
-	project, e := s.m.pg.CreateBranchProject(r.Context(), team, t.ID, collab.BranchActor{Admin: p.Admin, MemberID: p.MemberID}, in.Policy)
+	project, e := s.m.pg.CreateBranchProject(r.Context(), team, t.ID, collab.BranchActor{Admin: p.Admin, MemberID: p.MemberID}, in.Policy, sourceDigest)
 	if e != nil {
 		branchError(w, e)
 		return

@@ -92,13 +92,14 @@ type ExecutionEvidence struct {
 }
 
 type ExecutionResult struct {
-	Version    int                 `json:"version"`
-	Outcome    string              `json:"outcome"`
-	Summary    string              `json:"summary"`
-	Checkpoint string              `json:"checkpoint,omitempty"`
-	Role       string              `json:"role"`
-	Model      string              `json:"model"`
-	Evidence   []ExecutionEvidence `json:"evidence"`
+	Version    int                     `json:"version"`
+	Outcome    string                  `json:"outcome"`
+	Summary    string                  `json:"summary"`
+	Checkpoint string                  `json:"checkpoint,omitempty"`
+	Role       string                  `json:"role"`
+	Model      string                  `json:"model"`
+	Evidence   []ExecutionEvidence     `json:"evidence"`
+	Review     *BranchReviewAssessment `json:"review,omitempty"`
 }
 
 func ContentHash(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }

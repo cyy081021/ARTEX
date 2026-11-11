@@ -20,35 +20,40 @@ type BranchAsset struct {
 // retry/assistance/epoch consumes the same project allocation. Runtime remains
 // additionally bounded by MaxToolSeconds and each WorkContract's wall budget.
 type BranchPolicy struct {
-	Version           int64                      `json:"version"`
-	Goal              string                     `json:"goal"`
-	Assets            []BranchAsset              `json:"assets"`
-	Materials         []Material                 `json:"materials"`
-	Budget            int64                      `json:"budget"`
-	MaxToolSeconds    int                        `json:"max_tool_seconds"`
-	MinToolIntervalMS int                        `json:"min_tool_interval_ms"`
-	AutoPublish       bool                       `json:"auto_publish"`
-	Kinds             []string                   `json:"kinds"`
-	PlannerPrompts    map[string]string          `json:"planner_prompts"`
-	Roles             map[string]ExecutionConfig `json:"roles"`
+	Version           int64                          `json:"version"`
+	Goal              string                         `json:"goal"`
+	Assets            []BranchAsset                  `json:"assets"`
+	Materials         []Material                     `json:"materials"`
+	Budget            int64                          `json:"budget"`
+	MaxToolSeconds    int                            `json:"max_tool_seconds"`
+	MinToolIntervalMS int                            `json:"min_tool_interval_ms"`
+	AutoPublish       bool                           `json:"auto_publish"`
+	AutoDispatch      bool                           `json:"auto_dispatch,omitempty"`
+	AutoReview        bool                           `json:"auto_review,omitempty"`
+	Kinds             []string                       `json:"kinds"`
+	PlannerPrompts    map[string]string              `json:"planner_prompts"`
+	Roles             map[string]ExecutionConfig     `json:"roles"`
+	DeviceRoles       map[string]map[string][]string `json:"device_roles,omitempty"`
+	Constraints       []string                       `json:"constraints,omitempty"`
 }
 
 type BranchWorkSpec struct {
-	Title             string   `json:"title"`
-	Question          string   `json:"question"`
-	Kind              string   `json:"kind"`
-	AssetIDs          []string `json:"asset_ids"`
-	MaterialHashes    []string `json:"material_hashes"`
-	Roles             []string `json:"roles"`
-	Acceptance        []string `json:"acceptance"`
-	Budget            int64    `json:"budget"`
-	ResourceKeys      []string `json:"resource_keys"`
-	DependsOn         []int64  `json:"depends_on"`
-	Restricted        bool     `json:"restricted"`
-	Members           []int64  `json:"members"`
-	WorkflowRequestID int64    `json:"workflow_request_id,omitempty"`
-	ParentBranchID    int64    `json:"parent_branch_id,omitempty"`
-	Coordinator       bool     `json:"coordinator,omitempty"`
+	Title                string              `json:"title"`
+	Question             string              `json:"question"`
+	Kind                 string              `json:"kind"`
+	AssetIDs             []string            `json:"asset_ids"`
+	MaterialHashes       []string            `json:"material_hashes"`
+	Roles                []string            `json:"roles"`
+	RequiredCapabilities map[string][]string `json:"required_capabilities,omitempty"`
+	Acceptance           []string            `json:"acceptance"`
+	Budget               int64               `json:"budget"`
+	ResourceKeys         []string            `json:"resource_keys"`
+	DependsOn            []int64             `json:"depends_on"`
+	Restricted           bool                `json:"restricted"`
+	Members              []int64             `json:"members"`
+	WorkflowRequestID    int64               `json:"workflow_request_id,omitempty"`
+	ParentBranchID       int64               `json:"parent_branch_id,omitempty"`
+	Coordinator          bool                `json:"coordinator,omitempty"`
 }
 
 type BranchPoolWork struct {
@@ -133,6 +138,8 @@ type ExecutionBranch struct {
 	Outcome         string            `json:"outcome,omitempty"`
 	Summary         string            `json:"summary,omitempty"`
 	Reviewers       []int64           `json:"reviewers,omitempty"`
+	ReviewMode      string            `json:"review_mode,omitempty"`
+	ReviewReason    string            `json:"review_reason,omitempty"`
 	Contributors    []int64           `json:"contributors"`
 	NodeSeq         int64             `json:"node_seq"`
 }

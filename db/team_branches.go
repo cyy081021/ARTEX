@@ -92,7 +92,7 @@ func branchActorTx(ctx context.Context, tx *sql.Tx, team, task int64, a collab.B
 	return a, nil
 }
 
-func (d *DB) CreateBranchProject(ctx context.Context, team, task int64, a collab.BranchActor, policy collab.BranchPolicy) (*collab.BranchProject, error) {
+func (d *DB) CreateBranchProject(ctx context.Context, team, task int64, a collab.BranchActor, policy collab.BranchPolicy, setupDigest ...string) (*collab.BranchProject, error) {
 	if err := collab.ValidateBranchPolicy(policy); err != nil {
 		return nil, err
 	}
@@ -103,6 +103,11 @@ func (d *DB) CreateBranchProject(ctx context.Context, team, task int64, a collab
 	defer tx.Rollback()
 	if err = LockTaskEvidenceTx(tx, task); err != nil {
 		return nil, err
+	}
+	if len(setupDigest) > 0 && setupDigest[0] != "" {
+		if err = checkBranchSetupSource(ctx, tx, team, task, setupDigest[0]); err != nil {
+			return nil, err
+		}
 	}
 	if !a.Admin {
 		if err = teamPermissionTx(ctx, tx, team, task, a.MemberID, "manage"); err != nil {
@@ -123,6 +128,67 @@ func (d *DB) CreateBranchProject(ctx context.Context, team, task int64, a collab
 	p := &collab.BranchProject{TeamID: team, TaskID: task, Revision: 1, Policy: policy, State: "paused", Pool: []collab.BranchPoolWork{}, Branches: []collab.ExecutionBranch{}, Permissions: map[string][]string{}, Receipts: map[string]collab.BranchReceipt{}}
 	if a.MemberID > 0 {
 		p.Permissions[strconv.FormatInt(a.MemberID, 10)] = append([]string{}, collab.BranchPermissions...)
+	}
+	// Approved devices inherit only the owner's existing task authority. A
+	// successful pairing alone never grants access to a task or its branches.
+	for deviceID := range policy.DeviceRoles {
+		var owner int64
+		if err = tx.QueryRowContext(ctx, `SELECT d.owner_member_id FROM team_devices d JOIN team_members m ON m.id=d.owner_member_id WHERE d.id=$1 AND d.team_id=$2 AND d.revoked_at IS NULL AND m.revoked_at IS NULL FOR SHARE OF d,m`, deviceID, team).Scan(&owner); err != nil {
+			return nil, ErrTeamCollaborationDenied
+		}
+		for _, permission := range []string{"read", "execute"} {
+			if err = teamPermissionTx(ctx, tx, team, task, owner, permission); err != nil {
+				return nil, err
+			}
+		}
+		key := strconv.FormatInt(owner, 10)
+		if len(p.Permissions[key]) == 0 {
+			p.Permissions[key] = []string{"read", "process", "evidence", "discuss", "execute", "guide", "control"}
+			for _, permission := range []string{"review", "manage"} {
+				if teamPermissionTx(ctx, tx, team, task, owner, permission) == nil {
+					p.Permissions[key] = append(p.Permissions[key], permission)
+				}
+			}
+		}
+	}
+	if len(policy.DeviceRoles) > 0 {
+		rows, e := tx.QueryContext(ctx, `SELECT p.member_id,p.permission FROM team_task_permissions p JOIN team_members m ON m.id=p.member_id WHERE p.team_id=$1 AND p.task_id=$2 AND m.revoked_at IS NULL ORDER BY p.member_id,p.permission FOR SHARE OF p,m`, team, task)
+		if e != nil {
+			return nil, e
+		}
+		base := map[int64][]string{}
+		for rows.Next() {
+			var member int64
+			var permission string
+			if e = rows.Scan(&member, &permission); e != nil {
+				rows.Close()
+				return nil, e
+			}
+			base[member] = append(base[member], permission)
+		}
+		e = rows.Err()
+		rows.Close()
+		if e != nil {
+			return nil, e
+		}
+		for member, permissions := range base {
+			if !slices.Contains(permissions, "read") {
+				continue
+			}
+			key := strconv.FormatInt(member, 10)
+			grants := []string{"read", "process", "evidence", "discuss"}
+			if slices.Contains(permissions, "execute") {
+				grants = append(grants, "execute", "guide", "control")
+			}
+			for _, permission := range []string{"review", "manage"} {
+				if slices.Contains(permissions, permission) {
+					grants = append(grants, permission)
+				}
+			}
+			if len(p.Permissions[key]) == 0 {
+				p.Permissions[key] = grants
+			}
+		}
 	}
 	raw, _ := json.Marshal(p)
 	if _, err = tx.ExecContext(ctx, `INSERT INTO team_branch_projects(team_id,task_id,state) VALUES($1,$2,$3)`, team, task, raw); err != nil {
@@ -192,35 +258,21 @@ func (d *DB) ApplyBranchCommand(ctx context.Context, team, task int64, a collab.
 	if err != nil {
 		return nil, err
 	}
-	if err = syncBranchAssistance(ctx, tx, p); err != nil {
-		return nil, err
-	}
 	if c.Type == "project_pause" || c.Type == "project_resume" || c.Type == "close" || c.Type == "invalidate_evidence" {
 		paused := p.State != "running"
 		if _, err = tx.ExecContext(ctx, `UPDATE tasks SET paused=$2,queued=false,queue_mode='' WHERE id=$1`, task, paused); err != nil {
 			return nil, err
 		}
 	}
-	for _, ev := range events {
-		p.Cursor++
-		ev.ID = p.Cursor
-		ev.CreatedAt = time.Now().UTC()
-		raw, e := json.Marshal(ev)
-		if e != nil {
-			return nil, e
-		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO team_branch_events(task_id,seq,branch_id,event) VALUES($1,$2,$3,$4)`, task, ev.ID, ev.BranchID, raw); err != nil {
-			return nil, err
-		}
-	}
-	raw, err := json.Marshal(p)
+	autoEvents, err := dispatchBranchesTx(ctx, tx, p)
 	if err != nil {
 		return nil, err
 	}
-	if len(raw) > 32<<20 {
-		return nil, fmt.Errorf("分支项目状态超过大小上限")
+	events = append(events, autoEvents...)
+	if err = syncBranchAssistance(ctx, tx, p); err != nil {
+		return nil, err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE team_branch_projects SET state=$2,updated_at=now() WHERE task_id=$1`, task, raw); err != nil {
+	if err = persistBranchProjectTx(ctx, tx, p, events); err != nil {
 		return nil, err
 	}
 	reply := &collab.BranchReply{Policy: p.Policy, Receipt: receipt, Cursor: p.Cursor}
@@ -267,6 +319,9 @@ func restrictBranchReply(r *collab.BranchReply) {
 	roles := map[string]collab.ExecutionConfig{}
 	for k, v := range r.Policy.Roles {
 		if slices.Contains(b.Spec.Roles, k) {
+			if r.Policy.DeviceRoles != nil {
+				v.Capabilities = append([]string{}, r.Policy.DeviceRoles[strconv.FormatInt(b.DeviceID, 10)][k]...)
+			}
 			roles[k] = v
 		}
 	}
@@ -357,11 +412,21 @@ func (d *DB) BranchDevicePoll(ctx context.Context, device *TeamDevice) ([]collab
 		e = LockTaskEvidenceTx(tx, task)
 		var p *collab.BranchProject
 		if e == nil {
-			p, e = branchLoadTx(ctx, tx, device.TeamID, task, false)
+			p, e = branchLoadTx(ctx, tx, device.TeamID, task, true)
 		}
 		a := collab.BranchActor{MemberID: device.OwnerMemberID, DeviceID: device.ID}
 		if e == nil {
 			a, e = branchActorTx(ctx, tx, device.TeamID, task, a)
+		}
+		if e == nil {
+			var events []collab.BranchEvent
+			events, e = dispatchBranchesTx(ctx, tx, p)
+			if e == nil && len(events) > 0 {
+				e = syncBranchAssistance(ctx, tx, p)
+				if e == nil {
+					e = persistBranchProjectTx(ctx, tx, p, events)
+				}
+			}
 		}
 		if e == nil {
 			for i := range p.Branches {
@@ -378,7 +443,11 @@ func (d *DB) BranchDevicePoll(ctx context.Context, device *TeamDevice) ([]collab
 				out = append(out, r)
 			}
 		}
-		tx.Rollback()
+		if e == nil {
+			e = tx.Commit()
+		} else {
+			tx.Rollback()
+		}
 		if e != nil && !errors.Is(e, ErrTeamCollaborationDenied) {
 			return nil, e
 		}

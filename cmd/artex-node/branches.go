@@ -14,7 +14,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -369,6 +371,12 @@ func runBranchRound(ctx context.Context, cfg localExecutionConfig, origin, token
 	if b.State != "ready" && b.State != "running" {
 		return nil
 	}
+	if b.Spec.Coordinator && reply.Policy.AutoDispatch {
+		if branchCoordinatorHasUnits(b) {
+			return branchCommand(ctx, client, origin, token, b, collab.BranchCommand{Type: "checkpoint", State: "blocked", Text: "Automatic coordinator branches cannot execute branch units; member review is required to repair this state."})
+		}
+		return runBranchPlanner(ctx, cfg, origin, token, client, reply, map[string]string{}, work, journal)
+	}
 	files, err := fetchBranchMaterials(ctx, client, origin, token, b, reply.Policy, work)
 	if err != nil {
 		return branchCommand(ctx, client, origin, token, b, collab.BranchCommand{Type: "checkpoint", State: "blocked", Text: "Assigned materials could not be verified; no model or tool operation started."})
@@ -394,6 +402,10 @@ func runBranchRound(ctx context.Context, cfg localExecutionConfig, origin, token
 		}
 	}
 	return runBranchPlanner(ctx, cfg, origin, token, client, reply, files, work, journal)
+}
+
+func branchCoordinatorHasUnits(b *collab.ExecutionBranch) bool {
+	return b != nil && len(b.Units) != 0
 }
 
 func branchUnitDependenciesReady(b *collab.ExecutionBranch, u collab.BranchUnit) bool {
@@ -531,7 +543,7 @@ func fetchBranchMaterials(ctx context.Context, client *http.Client, origin, toke
 func runBranchPlanner(ctx context.Context, cfg localExecutionConfig, origin, token string, client *http.Client, reply collab.BranchReply, files map[string]string, work, journal string) error {
 	b := reply.Branch
 	registerBranchJournal(b, journal)
-	snapshot := branchPlannerSnapshotKey(b, reply.Policy, reply.Dependencies)
+	snapshot := branchPlannerSnapshotKey(b, reply.Policy, reply.Dependencies, reply.Coordination)
 	if done, err := branchPlannerSnapshotDone(journal, snapshot); err != nil {
 		return err
 	} else if done {
@@ -554,9 +566,21 @@ func runBranchPlanner(ctx context.Context, cfg localExecutionConfig, origin, tok
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(rc.BudgetSeconds)*time.Second)
 	defer cancel()
 	var waiting, submitted atomic.Bool
-	tools := branchPlannerTools(ctx, cfg, origin, token, client, b, reply.Policy, reply.Dependencies, journal, cancel, &waiting, &submitted)
+	var coordinationChanged atomic.Bool
+	autoCoordinator := b.Spec.Coordinator && reply.Policy.AutoDispatch
+	tools := branchPlannerTools(ctx, cfg, origin, token, client, b, reply.Policy, reply.Dependencies, journal, cancel, &waiting, &submitted, autoCoordinator, &coordinationChanged)
 	provider = &branchMeteredProvider{inner: provider, ctx: ctx, cfg: cfg, origin: origin, token: token, client: client, branch: b, unitID: 0, role: role, journal: journal, plannerSnapshot: snapshot}
-	opt := agentcore.Options{Provider: provider, SystemPrompt: []string{rc.SystemPrompt, "You are the persistent planner for this branch only. Review current units, results, accepted dependencies, coordination work pool, and remaining budget before proposing new work. Never replay an unknown or failed unit: propose a new unit with supersedes set to the old unit ID and explain an independent verification route. Use propose_work for one bounded unit, branch_wait when blocked, and submit_branch only with candidate or negative after reviewer coverage."}, Tools: tools, PermissionMode: permission.ModeBypass, WorkingDir: work, MaxTurns: rc.MaxTurns, MaxDuration: time.Duration(rc.BudgetSeconds) * time.Second, EnableWebFetch: false, EnableWebSearch: false}
+	instruction := "You are the persistent planner for this branch only. Review current units, results, accepted dependencies, coordination work pool, and remaining budget before proposing new work. Never replay an unknown or failed unit: propose a new unit with supersedes set to the old unit ID and explain an independent verification route. Use propose_work for one bounded unit, branch_wait when blocked, and submit_branch only with candidate or negative after reviewer coverage."
+	if autoCoordinator {
+		instruction = branchCoordinatorInstruction(reply)
+	}
+	systemPrompt := []string{rc.SystemPrompt, instruction}
+	if autoCoordinator {
+		// Coordination has its own narrow responsibility. Do not mix the
+		// configured single-branch planner prompt into this session.
+		systemPrompt = []string{instruction, "Treat policy.constraints in the input as binding project constraints; preserve them when dividing work."}
+	}
+	opt := agentcore.Options{Provider: provider, SystemPrompt: systemPrompt, Tools: tools, PermissionMode: permission.ModeBypass, WorkingDir: work, MaxTurns: rc.MaxTurns, MaxDuration: time.Duration(rc.BudgetSeconds) * time.Second, EnableWebFetch: false, EnableWebSearch: false}
 	s := agentcore.NewSession(opt)
 	defer s.Close()
 	input, _ := json.Marshal(map[string]any{"goal": reply.Policy.Goal, "branch": b, "dependencies": reply.Dependencies, "coordination": reply.Coordination, "policy": reply.Policy, "verified_material_hashes": sortedMapKeys(files)})
@@ -572,6 +596,14 @@ func runBranchPlanner(ctx context.Context, cfg localExecutionConfig, origin, tok
 	for ev, e := range s.Prompt(ctx, string(input)) {
 		if e != nil {
 			if waiting.Load() || submitted.Load() {
+				if autoCoordinator {
+					ackCtx, ackCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+					defer ackCancel()
+					if err := branchMarkGuidanceApplied(ackCtx, client, origin, token, b); err != nil {
+						return err
+					}
+					snapshot = branchPlannerSnapshotKey(b, reply.Policy, reply.Dependencies, reply.Coordination)
+				}
 				return appendBranchJournal(journal, map[string]any{"kind": "planner_done", "snapshot": snapshot})
 			}
 			return e
@@ -586,12 +618,24 @@ func runBranchPlanner(ctx context.Context, cfg localExecutionConfig, origin, tok
 			return err
 		}
 	}
-	if len(b.Units) == initialUnits && b.State == initialState && !waiting.Load() && !submitted.Load() {
+	if len(b.Units) == initialUnits && b.State == initialState && !waiting.Load() && !submitted.Load() && !coordinationChanged.Load() && !autoCoordinator {
 		if err := branchCommand(ctx, client, origin, token, b, collab.BranchCommand{Type: "checkpoint", State: "paused", Text: "Planner produced no new work, wait, or submission. Await member guidance or a branch policy/control change before planning again."}); err != nil {
 			return err
 		}
 		return appendBranchJournal(journal, map[string]any{"kind": "planner_paused", "snapshot": snapshot})
 	}
+	if err := branchMarkGuidanceApplied(ctx, client, origin, token, b); err != nil {
+		return err
+	}
+	if autoCoordinator {
+		// Keep the coordinator branch live. The journal key suppresses another
+		// model call until the coordination snapshot changes.
+		snapshot = branchPlannerSnapshotKey(b, reply.Policy, reply.Dependencies, reply.Coordination)
+	}
+	return appendBranchJournal(journal, map[string]any{"kind": "planner_done", "snapshot": snapshot})
+}
+
+func branchMarkGuidanceApplied(ctx context.Context, client *http.Client, origin, token string, b *collab.ExecutionBranch) error {
 	for _, g := range b.Guidance {
 		if g.Status == "queued" || g.Status == "pending" || g.Status == "received" {
 			if err := branchCommand(ctx, client, origin, token, b, collab.BranchCommand{Type: "guidance_applied", GuidanceIDs: []int64{g.ID}}); err != nil {
@@ -599,10 +643,27 @@ func runBranchPlanner(ctx context.Context, cfg localExecutionConfig, origin, tok
 			}
 		}
 	}
-	return appendBranchJournal(journal, map[string]any{"kind": "planner_done", "snapshot": snapshot})
+	return nil
 }
 
-func branchPlannerSnapshotKey(b *collab.ExecutionBranch, p collab.BranchPolicy, deps []collab.ExecutionBranch) string {
+func branchPlannerSnapshotKey(b *collab.ExecutionBranch, p collab.BranchPolicy, deps []collab.ExecutionBranch, coordination ...*collab.BranchSnapshot) string {
+	if b.Spec.Coordinator && p.AutoDispatch {
+		var state *collab.BranchSnapshot
+		if len(coordination) > 0 {
+			state = coordination[0]
+		}
+		guidance := append([]collab.BranchGuidance(nil), b.Guidance...)
+		sort.Slice(guidance, func(i, j int) bool { return guidance[i].ID < guidance[j].ID })
+		raw, _ := json.Marshal(struct {
+			Epoch         int64                   `json:"epoch"`
+			PolicyVersion int64                   `json:"policy_version"`
+			Spec          collab.BranchWorkSpec   `json:"spec"`
+			Guidance      []collab.BranchGuidance `json:"guidance"`
+			Coordination  string                  `json:"coordination"`
+		}{b.Epoch, p.Version, b.Spec, guidance, branchCoordinationSnapshotKey(state, b.ID)})
+		sum := sha256.Sum256(raw)
+		return hex.EncodeToString(sum[:])
+	}
 	units := append([]collab.BranchUnit(nil), b.Units...)
 	sort.Slice(units, func(i, j int) bool { return units[i].ID < units[j].ID })
 	v := struct {
@@ -614,10 +675,82 @@ func branchPlannerSnapshotKey(b *collab.ExecutionBranch, p collab.BranchPolicy, 
 		Units         []collab.BranchUnit      `json:"units"`
 		Guidance      []collab.BranchGuidance  `json:"guidance"`
 		Dependencies  []collab.ExecutionBranch `json:"dependencies"`
-	}{b.Epoch, b.Revision, b.State, p.Version, b.Spec, units, b.Guidance, deps}
+		Coordination  string                   `json:"coordination,omitempty"`
+	}{b.Epoch, b.Revision, b.State, p.Version, b.Spec, units, b.Guidance, deps, ""}
+	if len(coordination) > 0 && coordination[0] != nil {
+		v.Coordination = branchCoordinationSnapshotKey(coordination[0])
+	}
 	raw, _ := json.Marshal(v)
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
+}
+
+func branchCoordinationSnapshotKey(snapshot *collab.BranchSnapshot, ignoreBranchIDs ...int64) string {
+	if snapshot == nil {
+		return ""
+	}
+	type workState struct {
+		ID       int64                 `json:"id"`
+		State    string                `json:"state"`
+		BranchID int64                 `json:"branch_id"`
+		Spec     collab.BranchWorkSpec `json:"spec"`
+	}
+	type branchState struct {
+		ID           int64                 `json:"id"`
+		WorkID       int64                 `json:"work_id"`
+		Revision     int64                 `json:"revision"`
+		State        string                `json:"state"`
+		Reason       string                `json:"reason"`
+		Checkpoint   string                `json:"checkpoint"`
+		Outcome      string                `json:"outcome"`
+		Summary      string                `json:"summary"`
+		ReviewMode   string                `json:"review_mode"`
+		ReviewReason string                `json:"review_reason"`
+		Spec         collab.BranchWorkSpec `json:"spec"`
+	}
+	pool := make([]workState, 0, len(snapshot.Project.Pool))
+	for _, work := range snapshot.Project.Pool {
+		pool = append(pool, workState{ID: work.ID, State: work.State, BranchID: work.BranchID, Spec: work.Spec})
+	}
+	sort.Slice(pool, func(i, j int) bool { return pool[i].ID < pool[j].ID })
+	branches := make([]branchState, 0, len(snapshot.Project.Branches))
+	for _, branch := range snapshot.Project.Branches {
+		if slices.Contains(ignoreBranchIDs, branch.ID) {
+			continue
+		}
+		branches = append(branches, branchState{ID: branch.ID, WorkID: branch.WorkID, Revision: branch.Revision, State: branch.State, Reason: branch.Reason, Checkpoint: branch.Checkpoint, Outcome: branch.Outcome, Summary: branch.Summary, ReviewMode: branch.ReviewMode, ReviewReason: branch.ReviewReason, Spec: branch.Spec})
+	}
+	sort.Slice(branches, func(i, j int) bool { return branches[i].ID < branches[j].ID })
+	raw, _ := json.Marshal(struct {
+		Pool     []workState   `json:"pool"`
+		Branches []branchState `json:"branches"`
+	}{pool, branches})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func branchCoordinatorInstruction(reply collab.BranchReply) string {
+	remaining := reply.Policy.Budget
+	if reply.Coordination != nil {
+		reserved := int64(0)
+		for _, item := range reply.Coordination.Project.Pool {
+			if item.BranchID == 0 && item.State != "cancelled" && item.State != "rejected" {
+				reserved += item.Spec.Budget
+			}
+		}
+		for _, branch := range reply.Coordination.Project.Branches {
+			reserved += branch.Spec.Budget
+		}
+		remaining -= reserved
+	}
+	if remaining < 0 {
+		remaining = 0
+	}
+	reviewRule := "Treat all child results as candidates for independent member review; do not accept findings or declare the master task complete."
+	if reply.Policy.AutoReview {
+		reviewRule = "The configured independent reviewer may automatically accept clear, evidence-backed work; unresolved or ambiguous cases remain for a human. You must not accept findings or declare the master task complete yourself."
+	}
+	return fmt.Sprintf("You are the isolated coordinator for this task, not a branch worker or reviewer. Plan and dispatch bounded child branches only. Split only assets, materials, roles and per-device capabilities already approved by branch policy and the setup's DeviceRoles; never widen them or infer extra scope. Assign disjoint, explicit policy asset IDs to work where possible, avoid duplicate or overlapping work already in the coordination pool or branches, and connect dependent work through dependencies. In every child WorkSpec, express needed tool keys by role in required_capabilities so the scheduler can match devices; never guess or set a device ID. The project budget ceiling is %d units; budget already reserved by non-cancelled pool work and all branches is accounted for, including this coordinator branch, leaving at most %d units. Each child budget must fit the remaining amount and the shared ceiling. %s Use only propose_branch, publish_branch, and branch_wait. After proposing or publishing work, wait for a coordination state change before planning again.", reply.Policy.Budget, remaining, reviewRule)
 }
 
 func branchPlannerSnapshotDone(path, key string) (bool, error) {
@@ -643,7 +776,7 @@ func branchPlannerSnapshotDone(path, key string) (bool, error) {
 	return done[key], nil
 }
 
-func branchPlannerTools(ctx context.Context, cfg localExecutionConfig, origin, token string, client *http.Client, b *collab.ExecutionBranch, p collab.BranchPolicy, dependencies []collab.ExecutionBranch, journal string, cancel context.CancelFunc, waiting, submitted *atomic.Bool) []actool.CoreTool {
+func branchPlannerTools(ctx context.Context, cfg localExecutionConfig, origin, token string, client *http.Client, b *collab.ExecutionBranch, p collab.BranchPolicy, dependencies []collab.ExecutionBranch, journal string, cancel context.CancelFunc, waiting, submitted *atomic.Bool, autoCoordinator bool, coordinationChanged *atomic.Bool) []actool.CoreTool {
 	make := func(name, description string, schema map[string]any, fn func(json.RawMessage) (string, error)) actool.CoreTool {
 		return actool.Build(actool.Spec{Name: name, Description: description, Schema: schema, ReadOnly: func(json.RawMessage) bool { return false }, Concurrent: func(json.RawMessage) bool { return false }, Permissions: func(context.Context, json.RawMessage, permission.Context) permission.Decision {
 			return permission.Allowed()
@@ -654,6 +787,49 @@ func branchPlannerTools(ctx context.Context, cfg localExecutionConfig, origin, t
 			}
 			return actool.Text(out), nil
 		}})
+	}
+	if autoCoordinator {
+		return []actool.CoreTool{
+			make("branch_wait", "Wait for a coordination pool, branch state, or member guidance change. This does not execute or complete work.", map[string]any{"type": "object", "properties": map[string]any{"reason": map[string]any{"type": "string"}}, "required": []string{"reason"}}, func(raw json.RawMessage) (string, error) {
+				var q struct {
+					Reason string `json:"reason"`
+				}
+				if json.Unmarshal(raw, &q) != nil {
+					return "", errors.New("invalid wait")
+				}
+				waiting.Store(true)
+				cancel()
+				return "waiting for a coordination state change", nil
+			}),
+			make("propose_branch", "Propose one bounded child branch for a coordination work item.", map[string]any{"type": "object", "properties": map[string]any{"work": map[string]any{"type": "object"}}, "required": []string{"work"}}, func(raw json.RawMessage) (string, error) {
+				var x struct {
+					Work collab.BranchWorkSpec `json:"work"`
+				}
+				if json.Unmarshal(raw, &x) != nil {
+					return "", errors.New("invalid branch proposal")
+				}
+				x.Work.Coordinator = false
+				rec, err := postBranch(ctx, client, origin, token, b, collab.BranchCommand{Type: "propose", Work: &x.Work})
+				if err == nil {
+					coordinationChanged.Store(true)
+				}
+				return fmt.Sprintf("branch proposal receipt=%s", rec.Hash), err
+			}),
+			make("publish_branch", "Publish one bounded coordination branch to the authorized work pool.", map[string]any{"type": "object", "properties": map[string]any{"work": map[string]any{"type": "object"}}, "required": []string{"work"}}, func(raw json.RawMessage) (string, error) {
+				var x struct {
+					Work collab.BranchWorkSpec `json:"work"`
+				}
+				if json.Unmarshal(raw, &x) != nil {
+					return "", errors.New("invalid branch publication")
+				}
+				x.Work.Coordinator = false
+				rec, err := postBranch(ctx, client, origin, token, b, collab.BranchCommand{Type: "publish", Work: &x.Work})
+				if err == nil {
+					coordinationChanged.Store(true)
+				}
+				return fmt.Sprintf("branch publication receipt=%s", rec.Hash), err
+			}),
+		}
 	}
 	tools := []actool.CoreTool{
 		make("propose_work", "Propose one bounded branch unit that respects branch assets, materials, roles, and remaining budget.", map[string]any{"type": "object", "properties": map[string]any{"unit": map[string]any{"type": "object"}}, "required": []string{"unit"}}, func(raw json.RawMessage) (string, error) {
@@ -1306,11 +1482,14 @@ func runBranchUnit(ctx context.Context, cfg localExecutionConfig, origin, token 
 	hooks := &branchToolHooks{ctx: ctx, client: client, origin: origin, token: token, branch: b, unitID: unit.ID, role: spec.Role, journal: journal, active: map[string][]string{}, activeHashes: map[string][]string{}, cancel: cancel}
 	tools = bindBranchToolHooks(tools, hooks)
 	sys := fmt.Sprintf("Perform this bounded unit only: %s\nAcceptance criteria: %s\nUse authorized tools/materials. Report evidence and uncertainty; do not claim the criterion was accepted.", spec.Question, strings.Join(contract.Acceptance, "; "))
+	if reply.Policy.AutoReview && isBranchReviewerRole(spec.Role) {
+		sys = "You are the independent reviewer for this work branch. Verify the specified dependency results against their acceptance criteria, evidence versions and source evidence. Accept when the evidence is sufficient and the criteria are met. Use needs_human when evidence is ambiguous, incomplete, conflicting, or otherwise needs judgment; do not invent uncertainty or require every possible tool record to succeed. Return the normal outcome and summary plus the required review object. Set evidence_versions to the exact provided EvidenceVersion for every reviewed work unit, keyed by decimal unit ID. Set acceptance_met only when the stated criteria are met. Give a concise reason and list only material unresolved uncertainties. Do not claim the master task is complete."
+	}
 	s := agentcore.NewSession(agentcore.Options{Provider: provider, SystemPrompt: []string{portable.SystemPrompt, sys}, Tools: tools, Hooks: hooks, PermissionMode: permission.ModeBypass, WorkingDir: work, MaxTurns: portable.MaxTurns, MaxDuration: time.Duration(contract.BudgetSeconds) * time.Second, EnableWebFetch: false, EnableWebSearch: false})
 	defer s.Close()
 	var summary strings.Builder
 	var promptErr error
-	for event, e := range s.Prompt(ctx, branchUnitInput(spec, b, reply.Policy, reply.Dependencies)) {
+	for event, e := range s.Prompt(ctx, branchUnitInput(spec, b, reply.Policy, reply.Dependencies, b)) {
 		if e != nil {
 			promptErr = e
 			break
@@ -1343,6 +1522,15 @@ func runBranchUnit(ctx context.Context, cfg localExecutionConfig, origin, token 
 		evidence[i].Input = nil
 	}
 	result := collab.ExecutionResult{Version: 1, Outcome: outcome, Summary: redactBranchText(cfg, summaryText), Role: spec.Role, Model: model.Model, Evidence: evidence}
+	if reply.Policy.AutoReview && isBranchReviewerRole(spec.Role) {
+		if assessment, reviewErr := parseBranchReviewFinal(summary.String()); reviewErr == nil {
+			assessment.Reason = redactBranchText(cfg, assessment.Reason)
+			for i := range assessment.Uncertainties {
+				assessment.Uncertainties[i] = redactBranchText(cfg, assessment.Uncertainties[i])
+			}
+			result.Review = assessment
+		}
+	}
 	if err = result.Validate(portable); err != nil {
 		return err
 	}
@@ -1361,7 +1549,7 @@ func runBranchUnit(ctx context.Context, cfg localExecutionConfig, origin, token 
 	return promptErr
 }
 
-func branchUnitInput(s collab.BranchUnitSpec, branch *collab.ExecutionBranch, p collab.BranchPolicy, dependencies []collab.ExecutionBranch) string {
+func branchUnitInput(s collab.BranchUnitSpec, branch *collab.ExecutionBranch, p collab.BranchPolicy, dependencies []collab.ExecutionBranch, branchContext ...*collab.ExecutionBranch) string {
 	byID := map[int64]collab.BranchUnit{}
 	for _, u := range branch.Units {
 		byID[u.ID] = u
@@ -1386,14 +1574,48 @@ func branchUnitInput(s collab.BranchUnitSpec, branch *collab.ExecutionBranch, p 
 			}
 		}
 	}
-	b, _ := json.Marshal(map[string]any{"question": s.Question, "work_contract": json.RawMessage(s.Contract), "asset_ids": s.AssetIDs, "material_hashes": s.MaterialHashes, "branch_goal": p.Goal, "dependency_unit_results": required, "source_evidence_refs": map[string]any{"branch_ids": sourceBranches, "units": sources}, "final_format": "Return final JSON only: {\"outcome\":\"candidate|blocked|failed\",\"summary\":\"...\"}."})
+	input := map[string]any{"question": s.Question, "work_contract": json.RawMessage(s.Contract), "asset_ids": s.AssetIDs, "material_hashes": s.MaterialHashes, "branch_goal": p.Goal, "dependency_unit_results": required, "source_evidence_refs": map[string]any{"branch_ids": sourceBranches, "units": sources}, "final_format": `Return final JSON only: {"outcome":"candidate|blocked|failed","summary":"..."}.`}
+	if p.AutoReview && isBranchReviewerRole(s.Role) && len(branchContext) > 0 && branchContext[0] != nil {
+		input["automatic_review_targets"] = branchReviewTargets(s, branchContext[0])
+		input["final_format"] = `Return final JSON only: {"outcome":"candidate","summary":"...","review":{"decision":"accept|needs_human","reason":"...","acceptance_met":true,"evidence_versions":{"<unit_id>":"<exact EvidenceVersion>"},"uncertainties":[]}}. For needs_human, explain the unresolved issue and include material uncertainties.`
+	}
+	b, _ := json.Marshal(input)
 	return string(b)
+}
+
+func isBranchReviewerRole(role string) bool {
+	return role == "reviewer" || role == "reverse_reviewer"
+}
+
+func branchReviewTargets(review collab.BranchUnitSpec, branch *collab.ExecutionBranch) []map[string]any {
+	targets := make([]map[string]any, 0, len(review.DependsOn))
+	for _, id := range review.DependsOn {
+		for _, unit := range branch.Units {
+			if unit.ID != id || unit.Result == nil {
+				continue
+			}
+			var contract struct {
+				Acceptance []string `json:"acceptance"`
+			}
+			_ = json.Unmarshal(unit.Spec.Contract, &contract)
+			targets = append(targets, map[string]any{
+				"unit_id":          unit.ID,
+				"evidence_version": unit.EvidenceVersion,
+				"role":             unit.Spec.Role,
+				"question":         unit.Spec.Question,
+				"acceptance":       contract.Acceptance,
+				"result":           unit.Result,
+			})
+		}
+	}
+	return targets
 }
 
 func parseBranchUnitFinal(raw string) (string, string, error) {
 	type final struct {
-		Outcome string `json:"outcome"`
-		Summary string `json:"summary"`
+		Outcome string          `json:"outcome"`
+		Summary string          `json:"summary"`
+		Review  json.RawMessage `json:"review,omitempty"`
 	}
 	dec := json.NewDecoder(strings.NewReader(strings.TrimSpace(raw)))
 	dec.DisallowUnknownFields()
@@ -1408,6 +1630,45 @@ func parseBranchUnitFinal(raw string) (string, string, error) {
 		return "", "", errors.New("outcome and summary are required")
 	}
 	return f.Outcome, strings.TrimSpace(f.Summary), nil
+}
+
+func parseBranchReviewFinal(raw string) (*collab.BranchReviewAssessment, error) {
+	type reviewFinal struct {
+		Outcome string                        `json:"outcome"`
+		Summary string                        `json:"summary"`
+		Review  collab.BranchReviewAssessment `json:"review"`
+	}
+	dec := json.NewDecoder(strings.NewReader(strings.TrimSpace(raw)))
+	dec.DisallowUnknownFields()
+	var f reviewFinal
+	if err := dec.Decode(&f); err != nil {
+		return nil, err
+	}
+	if dec.Decode(&struct{}{}) != io.EOF {
+		return nil, errors.New("trailing final content")
+	}
+	if (f.Outcome != "candidate" && f.Outcome != "blocked" && f.Outcome != "failed") || strings.TrimSpace(f.Summary) == "" {
+		return nil, errors.New("outcome and summary are required")
+	}
+	r := f.Review
+	if (r.Decision != "accept" && r.Decision != "needs_human") || strings.TrimSpace(r.Reason) == "" || len(r.Reason) > 8000 || len(r.EvidenceVersions) > 64 || len(r.Uncertainties) > 64 {
+		return nil, errors.New("invalid review assessment")
+	}
+	for id, version := range r.EvidenceVersions {
+		n, err := strconv.ParseInt(id, 10, 64)
+		if err != nil || n < 1 || strconv.FormatInt(n, 10) != id || len(version) != 64 {
+			return nil, errors.New("invalid review evidence version")
+		}
+		if _, err := hex.DecodeString(version); err != nil {
+			return nil, errors.New("invalid review evidence version")
+		}
+	}
+	for _, uncertainty := range r.Uncertainties {
+		if strings.TrimSpace(uncertainty) == "" || len(uncertainty) > 2048 {
+			return nil, errors.New("invalid review uncertainty")
+		}
+	}
+	return &r, nil
 }
 
 func scopedBranchTool(name string, cfg localCommandConfig, work string, ev *nodeEvidence, fields []string, assets []collab.BranchAsset) actool.CoreTool {

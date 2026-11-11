@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { http } from "@/lib/api";
-import { TeamSessionWorkspace } from "@/components/team-shared-messages";
+import { TeamBranchMessages } from "@/components/team-branch-messages";
 import { TeamBranches } from "@/components/team-branches";
 
 type Intent = {
@@ -207,6 +207,7 @@ export function ExecutionPanel({
   admin,
   initialTaskID,
   lockTaskSelection = false,
+  viewMode = "all",
 }: {
   team: string;
   tasks: { id: number; name: string; kind: string }[];
@@ -215,6 +216,7 @@ export function ExecutionPanel({
   admin: boolean;
   initialTaskID?: string;
   lockTaskSelection?: boolean;
+  viewMode?: "session" | "execution" | "review" | "all";
 }) {
   const [taskID, setTaskID] = React.useState(initialTaskID ?? "");
   const [branchMode, setBranchMode] = React.useState(false);
@@ -475,9 +477,9 @@ export function ExecutionPanel({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>工作交接与独立复核</CardTitle>
+        <CardTitle>{viewMode === "session" ? "任务会话" : viewMode === "execution" ? "协作进度与执行" : viewMode === "review" ? "复核与记录" : "工作交接与独立复核"}</CardTitle>
         <p className="text-muted-foreground text-sm">
-          设备执行一个明确工作单，返回带来源的候选证据。独立成员复核后，原任务继续验收。
+          查看设备分工、执行消息和结果。明确的核验结果自动接收，有疑点的转人工复审；主任务沿用原有验收流程。
         </p>
       </CardHeader>
       <CardContent className="space-y-5">
@@ -507,8 +509,8 @@ export function ExecutionPanel({
             ))}
           </select>
         </div>}
-        {taskID && !branchMode && <TeamSessionWorkspace team={team} taskId={taskID} />}
-        {taskID && <TeamBranches key={historyScope} team={team} taskId={Number(taskID)} memberID={memberID} admin={admin} members={members} devices={work?.devices} materials={work?.materials} canManage={admin || !!work?.permissions.manage} onModeChange={setBranchMode} />}
+        {taskID && (viewMode === "session" || viewMode === "all") && <TeamBranchMessages team={team} taskId={taskID} memberID={memberID} admin={admin} />}
+        {taskID && (viewMode === "execution" || viewMode === "all" || viewMode === "review") && <TeamBranches key={`${historyScope}:${viewMode}`} team={team} taskId={Number(taskID)} memberID={memberID} admin={admin} members={members} devices={work?.devices} materials={work?.materials} canManage={admin || !!work?.permissions.manage} onModeChange={setBranchMode} viewMode={viewMode === "review" ? "review" : "all"} />}
         {error && (
           <p role="alert" className="rounded-md border border-destructive/40 p-3 text-destructive text-sm">
             {error}
@@ -524,8 +526,9 @@ export function ExecutionPanel({
             正在读取工作单…
           </p>
         )}
-        {work && !branchMode && (
+        {work && !branchMode && viewMode !== "session" && (
           <>
+            {(viewMode === "execution" || viewMode === "all") && <>
             <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
               <span className="text-muted-foreground">每 5 秒同步 · 最近成功同步 {updated}</span>
               <Button type="button" variant="outline" size="sm" disabled={busy || loading} onClick={() => bump()}>
@@ -590,8 +593,10 @@ export function ExecutionPanel({
               </section>
             )}
             {canDispatch && (
+              <details className="rounded-md border p-4">
+                <summary className="cursor-pointer font-medium text-sm">高级操作：手动派发工作单</summary>
               <form
-                className="space-y-4 rounded-md border p-4"
+                className="mt-4 space-y-4"
                 onSubmit={(e) => {
                   e.preventDefault();
                   if (!dispatchReady) return;
@@ -822,7 +827,10 @@ export function ExecutionPanel({
                 </div>
                 <Button disabled={busy || !dispatchReady}>{submitLabel}</Button>
               </form>
+              </details>
             )}
+            </>}
+            {(viewMode === "review" || viewMode === "all") && <>
             <div className="space-y-3">
               {assignments.length === 0 && <p className="text-muted-foreground text-sm">此任务还没有设备交接记录。</p>}
               {assignments.map((a) => (
@@ -954,6 +962,7 @@ export function ExecutionPanel({
                 )}
               </details>
             </section>
+            </>}
           </>
         )}
       </CardContent>

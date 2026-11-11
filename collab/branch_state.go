@@ -78,6 +78,44 @@ func ValidateBranchPolicy(p BranchPolicy) error {
 			}
 		}
 	}
+	if len(p.Constraints) > 128 {
+		return ErrBranchInvalid
+	}
+	for _, constraint := range p.Constraints {
+		if strings.TrimSpace(constraint) == "" || len(constraint) > 4096 {
+			return ErrBranchInvalid
+		}
+	}
+	if len(p.DeviceRoles) > 256 {
+		return ErrBranchInvalid
+	}
+	if p.AutoDispatch && (len(p.DeviceRoles) == 0 || p.Budget < 5) {
+		return ErrBranchInvalid
+	}
+	for deviceID, roles := range p.DeviceRoles {
+		id, err := strconv.ParseInt(deviceID, 10, 64)
+		if err != nil || id < 1 || strconv.FormatInt(id, 10) != deviceID || len(roles) == 0 || len(roles) > len(p.Roles)+2 {
+			return ErrBranchInvalid
+		}
+		for role, caps := range roles {
+			if !validBranchName(role, 80) || (role != "planner" && role != "reverse_planner" && p.Roles[role].Role != role) || len(caps) > 64 {
+				return ErrBranchInvalid
+			}
+			if role == "planner" || role == "reverse_planner" {
+				if len(caps) != 0 {
+					return ErrBranchInvalid
+				}
+				continue
+			}
+			seenCaps := map[string]bool{}
+			for _, cap := range caps {
+				if !validBranchName(cap, 80) || seenCaps[cap] || !stringContains(p.Roles[role].Capabilities, cap) {
+					return ErrBranchInvalid
+				}
+				seenCaps[cap] = true
+			}
+		}
+	}
 	return nil
 }
 
@@ -244,6 +282,11 @@ func branchWorkValid(policy BranchPolicy, w BranchWorkSpec) error {
 	for _, r := range w.Roles {
 		cfg, ok := policy.Roles[r]
 		if !ok || cfg.Kind != w.Kind {
+			return ErrBranchInvalid
+		}
+	}
+	for role, caps := range w.RequiredCapabilities {
+		if !stringContains(w.Roles, role) || !subsetStrings(caps, policy.Roles[role].Capabilities) {
 			return ErrBranchInvalid
 		}
 	}
@@ -558,6 +601,7 @@ func ApplyBranchCommand(p *BranchProject, a BranchActor, c BranchCommand, now ti
 		if c.Work == nil {
 			return r, nil, ErrBranchInvalid
 		}
+		c.Work = withAutomaticReviewer(p.Policy, c.Work)
 		coordinator := isNode && b != nil && b.Spec.Coordinator
 		if (isNode && (b == nil || b.State != "running" || a.TaskPaused || p.State != "running")) || p.State == "complete" || p.State == "partial" || c.Work.ParentBranchID != 0 || c.Work.WorkflowRequestID != 0 || (isNode && c.Work.Coordinator) {
 			return r, nil, ErrBranchDenied
@@ -592,6 +636,7 @@ func ApplyBranchCommand(p *BranchProject, a BranchActor, c BranchCommand, now ti
 		r.WorkID = w.ID
 		mutated = true
 	case "assist":
+		c.Work = withAutomaticReviewer(p.Policy, c.Work)
 		if b == nil || c.Work == nil || (!isNode && need("manage") != nil) || (isNode && (b.State != "running" || a.TaskPaused || p.State != "running")) {
 			return r, nil, ErrBranchDenied
 		}
@@ -672,7 +717,7 @@ func ApplyBranchCommand(p *BranchProject, a BranchActor, c BranchCommand, now ti
 		if totalBudget(p) > p.Policy.Budget {
 			return r, nil, ErrBranchConflict
 		}
-		deviceID, compatible := selectBranchDevice(a, w.Spec, member, c.DeviceID)
+		deviceID, compatible := selectBranchDevice(p.Policy, a, w.Spec, member, c.DeviceID)
 		if !compatible {
 			return r, nil, ErrBranchDenied
 		}
@@ -755,6 +800,9 @@ func ApplyBranchCommand(p *BranchProject, a BranchActor, c BranchCommand, now ti
 		}
 		mutated = true
 	case "plan":
+		if b != nil && b.Spec.Coordinator && p.Policy.AutoDispatch {
+			return r, nil, ErrBranchDenied
+		}
 		if !isNode || a.DeviceID != b.DeviceID || c.Epoch != b.Epoch || b.State != "running" || a.TaskPaused || a.TaskTerminal || p.State != "running" || c.Unit == nil || !dependenciesAccepted(p, b) || !b.LeaseUntil.After(now) {
 			return r, nil, ErrBranchDenied
 		}
@@ -798,6 +846,9 @@ func ApplyBranchCommand(p *BranchProject, a BranchActor, c BranchCommand, now ti
 		mutated = true
 		err = add("plan", u.Spec.Question, u.ID)
 	case "start":
+		if b != nil && b.Spec.Coordinator && p.Policy.AutoDispatch && c.Operation != nil && (c.Operation.Kind != "model" || c.Operation.UnitID != 0) {
+			return r, nil, ErrBranchDenied
+		}
 		if !isNode || a.DeviceID != b.DeviceID || c.Epoch != b.Epoch || c.Operation == nil || b.State != "running" || p.State == "paused" || p.State == "complete" || p.State == "partial" || a.TaskPaused || a.TaskTerminal || !hasBranchPermission(p, member, "execute") {
 			return r, nil, ErrBranchDenied
 		}
@@ -848,6 +899,9 @@ func ApplyBranchCommand(p *BranchProject, a BranchActor, c BranchCommand, now ti
 			return r, nil, ErrBranchDenied
 		}
 		if op.Kind == "tool" {
+			if !deviceRoleAllows(p.Policy, dev.ID, u.Spec.Role, op.Tool) {
+				return r, nil, ErrBranchDenied
+			}
 			if (u.Spec.Role == "reviewer" || u.Spec.Role == "reverse_reviewer") && op.Tool != "read_material" {
 				return r, nil, ErrBranchDenied
 			}
@@ -856,13 +910,13 @@ func ApplyBranchCommand(p *BranchProject, a BranchActor, c BranchCommand, now ti
 					return r, nil, ErrBranchConflict
 				}
 			}
-			if op.Tool != "read_material" && op.Tool != "reverse_observe_runtime" && (!stringContains(p.Policy.Roles[u.Spec.Role].Capabilities, op.Tool) || !stringContains(u.Spec.Capabilities, op.Tool) || !stringContains(dev.RoleCapabilities[u.Spec.Role], op.Tool)) {
+			if op.Tool != "read_material" && op.Tool != "reverse_observe_runtime" && (!stringContains(p.Policy.Roles[u.Spec.Role].Capabilities, op.Tool) || !stringContains(u.Spec.Capabilities, op.Tool) || !stringContains(dev.RoleCapabilities[u.Spec.Role], op.Tool) || !deviceRoleAllows(p.Policy, dev.ID, u.Spec.Role, op.Tool)) {
 				return r, nil, ErrBranchDenied
 			}
 			if op.Tool == "read_material" && len(u.Spec.MaterialHashes) == 0 {
 				return r, nil, ErrBranchDenied
 			}
-			if op.Tool == "reverse_observe_runtime" && u.Spec.Role != "reverse_dynamic" {
+			if op.Tool == "reverse_observe_runtime" && (u.Spec.Role != "reverse_dynamic" || !deviceRoleAllows(p.Policy, dev.ID, u.Spec.Role, op.Tool)) {
 				return r, nil, ErrBranchDenied
 			}
 			if op.Tool == "reverse_observe_runtime" {
@@ -1191,7 +1245,7 @@ func ApplyBranchCommand(p *BranchProject, a BranchActor, c BranchCommand, now ti
 		if isNode || (!a.Admin && b.ControlID != member) || c.MemberID < 1 || c.Revision != b.Revision || stringContains([]string{"accepted", "cancelled", "failed", "review_pending"}, b.State) {
 			return r, nil, ErrBranchDenied
 		}
-		deviceID, ok := selectBranchDevice(a, b.Spec, c.MemberID, c.DeviceID)
+		deviceID, ok := selectBranchDevice(p.Policy, a, b.Spec, c.MemberID, c.DeviceID)
 		if !ok || !hasBranchPermission(p, c.MemberID, "read") || !hasBranchPermission(p, c.MemberID, "execute") {
 			return r, nil, ErrBranchDenied
 		}
@@ -1251,6 +1305,25 @@ func ApplyBranchCommand(p *BranchProject, a BranchActor, c BranchCommand, now ti
 		b.State = "review_pending"
 		b.Outcome = c.Outcome
 		b.Summary = c.Text
+		if p.Policy.AutoReview {
+			accepted, reason := automaticBranchReview(b)
+			b.ReviewMode = "automatic"
+			b.ReviewReason = reason
+			if accepted {
+				b.State = "accepted"
+				for i := range p.Pool {
+					if p.Pool[i].BranchID == b.ID {
+						p.Pool[i].State = "accepted"
+					}
+				}
+				err = add("auto_review", "自动接收为主任务补充证据："+reason, 0)
+			} else {
+				err = add("review_required", reason, 0)
+			}
+			if err != nil {
+				return r, nil, err
+			}
+		}
 		mutated = true
 		err = add("submitted", c.Text, 0)
 	case "review":
@@ -1261,6 +1334,8 @@ func ApplyBranchCommand(p *BranchProject, a BranchActor, c BranchCommand, now ti
 			return r, nil, ErrBranchDenied
 		}
 		b.Reviewers = appendUnique(b.Reviewers, member)
+		b.ReviewMode = "manual"
+		b.ReviewReason = c.Text
 		if c.State == "accept" {
 			b.State = "accepted"
 			for i := range p.Pool {
@@ -1428,7 +1503,7 @@ func cancelBranchAssistance(p *BranchProject, parent int64) {
 }
 
 func canTransferTo(p *BranchProject, a BranchActor, b *ExecutionBranch) bool {
-	_, ok := selectBranchDevice(a, b.Spec, b.PendingOwnerID, b.PendingDeviceID)
+	_, ok := selectBranchDevice(p.Policy, a, b.Spec, b.PendingOwnerID, b.PendingDeviceID)
 	return ok && hasBranchPermission(p, b.PendingOwnerID, "read") && hasBranchPermission(p, b.PendingOwnerID, "execute")
 }
 func finishBranchTransfer(b *ExecutionBranch) {
@@ -1474,7 +1549,7 @@ func branchRoleAllowed(kind, role string) bool {
 	return false
 }
 
-func selectBranchDevice(a BranchActor, spec BranchWorkSpec, member, requested int64) (int64, bool) {
+func selectBranchDevice(policy BranchPolicy, a BranchActor, spec BranchWorkSpec, member, requested int64) (int64, bool) {
 	ids := make([]int64, 0, len(a.Devices))
 	for id := range a.Devices {
 		ids = append(ids, id)
@@ -1485,11 +1560,45 @@ func selectBranchDevice(a BranchActor, spec BranchWorkSpec, member, requested in
 			continue
 		}
 		d := a.Devices[id]
-		if d.Active && d.OwnerID == member && d.Protocol == BranchProtocol && subsetStrings(spec.Roles, d.Roles) {
+		if d.Active && d.OwnerID == member && d.Protocol == BranchProtocol && subsetStrings(spec.Roles, d.Roles) && deviceMatchesBranchPolicy(policy, spec, d.ID) {
 			return id, true
 		}
 	}
 	return 0, false
+}
+
+func deviceMatchesBranchPolicy(policy BranchPolicy, spec BranchWorkSpec, deviceID int64) bool {
+	if len(policy.DeviceRoles) == 0 {
+		return true
+	}
+	approved, ok := policy.DeviceRoles[strconv.FormatInt(deviceID, 10)]
+	if !ok {
+		return false
+	}
+	roles := append([]string(nil), spec.Roles...)
+	if spec.Kind == "reverse" {
+		roles = append(roles, "reverse_planner", "reverse_reviewer")
+	} else {
+		roles = append(roles, "planner", "reviewer")
+	}
+	for _, role := range roles {
+		if _, ok := approved[role]; !ok {
+			return false
+		}
+	}
+	for role, caps := range spec.RequiredCapabilities {
+		if !subsetStrings(caps, approved[role]) {
+			return false
+		}
+	}
+	return true
+}
+
+func deviceRoleAllows(policy BranchPolicy, deviceID int64, role, capability string) bool {
+	if len(policy.DeviceRoles) == 0 {
+		return true
+	}
+	return stringContains(policy.DeviceRoles[strconv.FormatInt(deviceID, 10)][role], capability)
 }
 
 func readOnlyReviewCapability(cap string) bool {

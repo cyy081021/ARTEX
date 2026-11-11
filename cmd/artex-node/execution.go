@@ -592,6 +592,7 @@ func runAssignments(ctx context.Context, cfg localExecutionConfig, statePath, or
 		capabilityDoc := map[string]any{"version": 1, "message_protocol": 1, "execution_enabled": true, "roles": roles, "capabilities": caps, "role_capabilities": roleCaps, "runtime_profiles": runtimeProfiles}
 		if cfg.Branches.Enabled {
 			capabilityDoc["branch_protocol"] = collab.BranchProtocol
+			capabilityDoc["branch_setup"] = buildBranchSetupReport(cfg)
 		}
 		err = request(ctx, client, origin, "/api/collaboration/device/capabilities", state.Token, map[string]any{"capabilities": capabilityDoc}, nil)
 		if err == nil {

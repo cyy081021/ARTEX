@@ -24,6 +24,7 @@ function TeamTaskDetail() {
   const [dataScope, setDataScope] = React.useState("");
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(true);
+  const [activeTab, setActiveTab] = React.useState<"session" | "execution" | "review" | "overview">("session");
   const activeScope = `${team}:${id}`;
 
   React.useEffect(() => {
@@ -60,13 +61,13 @@ function TeamTaskDetail() {
     {error && <p role="alert" className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">任务状态读取失败：{error}{!currentDetail ? " 当前账号可能已失去访问权限。" : ""}</p>}
     {loading && !task && <p role="status" className="text-sm text-muted-foreground">正在读取任务和协作权限…</p>}
     {task && currentDetail && <>
-      <Card><CardHeader><CardTitle>{task.name || `任务 ${task.id}`}</CardTitle><p className="text-sm text-muted-foreground">任务 #{task.id} · {task.kind === "reverse" ? "逆向" : task.kind === "pentest" ? "渗透" : task.kind}</p></CardHeader><CardContent className="space-y-4">
-        <div className="flex flex-wrap gap-2"><Badge variant="outline">{teamSessionStateLabel(task.status)}</Badge>{task.paused && task.status !== "paused" && <Badge variant="outline">已暂停</Badge>}{task.queued && <Badge variant="outline">排队中</Badge>}</div>
-        <div><h2 className="font-medium">任务目标</h2><p className="mt-1 whitespace-pre-wrap break-words text-sm">{task.goal || "未提供任务目标。"}</p></div>
-        <div><h2 className="font-medium">当前授权</h2><p className="mt-1 text-sm">{[["查看", currentDetail.permissions.read], ["执行", currentDetail.permissions.execute], ["管理", currentDetail.permissions.manage], ["复核", currentDetail.permissions.review]].map(([name, allowed]) => `${name}：${allowed ? "允许" : "未授权"}`).join(" · ")}</p></div>
-        <p className="text-xs text-muted-foreground">创建：{task.created_at ? new Date(task.created_at).toLocaleString() : "未知"}{task.completed_at ? ` · 完成：${new Date(task.completed_at).toLocaleString()}` : ""}</p>
-      </CardContent></Card>
-      <ExecutionPanel key={`${team}:${id}`} team={team} tasks={[{ id: task.id, name: task.name, kind: task.kind }]} members={members} memberID={currentDetail.member_id} admin={currentDetail.is_admin} initialTaskID={id} lockTaskSelection />
+      <header className="space-y-3 rounded-md border bg-card p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-xl font-semibold">{task.name || `任务 ${task.id}`} <span className="text-sm font-normal text-muted-foreground">#{task.id}</span></h1><p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{task.goal || "未提供任务目标。"}</p></div><div className="flex flex-wrap gap-2"><Badge variant="outline">{task.kind === "reverse" ? "逆向" : task.kind === "pentest" ? "渗透" : task.kind}</Badge><Badge variant="secondary">{teamSessionStateLabel(task.status)}</Badge>{task.paused && task.status !== "paused" && <Badge variant="outline">已暂停</Badge>}{task.queued && <Badge variant="outline">排队中</Badge>}</div></div>
+      </header>
+      <nav role="tablist" aria-label="团队任务详情" className="flex flex-wrap gap-1 rounded-md border bg-muted/40 p-1">
+        {([["session", "会话"], ["execution", "协作进度 / 执行"], ["review", "复核与记录"], ["overview", "任务概览"]] as const).map(([key, label]) => <button key={key} role="tab" aria-selected={activeTab === key} className={`min-h-10 rounded px-3 text-sm ${activeTab === key ? "bg-background shadow-sm" : "text-muted-foreground"}`} onClick={() => setActiveTab(key)}>{label}</button>)}
+      </nav>
+      {activeTab === "overview" ? <Card><CardHeader><CardTitle>任务概览</CardTitle></CardHeader><CardContent className="space-y-4"><div><h2 className="text-sm font-medium">任务目标</h2><p className="mt-1 whitespace-pre-wrap break-words text-sm">{task.goal || "未提供任务目标。"}</p></div><div><h2 className="text-sm font-medium">当前权限</h2><p className="mt-1 text-sm">{[["查看", currentDetail.permissions.read], ["执行", currentDetail.permissions.execute], ["管理", currentDetail.permissions.manage], ["复核", currentDetail.permissions.review]].map(([name, allowed]) => `${name}：${allowed ? "允许" : "未授权"}`).join(" · ")}</p></div><p className="text-xs text-muted-foreground">创建：{task.created_at ? new Date(task.created_at).toLocaleString() : "未知"}{task.completed_at ? ` · 完成：${new Date(task.completed_at).toLocaleString()}` : ""}</p></CardContent></Card> : <ExecutionPanel key={`${team}:${id}`} team={team} tasks={[{ id: task.id, name: task.name, kind: task.kind }]} members={members} memberID={currentDetail.member_id} admin={currentDetail.is_admin} initialTaskID={id} lockTaskSelection viewMode={activeTab === "session" ? "session" : activeTab === "execution" ? "execution" : "review"} />}
     </>}
   </main>;
 }

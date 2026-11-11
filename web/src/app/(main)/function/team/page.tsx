@@ -8,7 +8,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { ExecutionPanel } from "./execution-panel";
 import { TeamLifecycle, TeamTaskPermissions } from "@/components/team-admin-controls";
 import { TeamConnectionGuide } from "@/components/team-connection-guide";
 
@@ -69,16 +68,16 @@ export default function TeamPage() {
     {error && <p role="alert" className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">{error}</p>}
     {notice && <p role="status" className="text-sm">{notice}</p>}
     <div className="flex flex-wrap items-center gap-3"><Label htmlFor="team-choice">当前团队</Label><select id="team-choice" value={selected} disabled={loading || busy} onChange={(e) => { setError(""); setSelected(e.target.value); }} className="min-h-10 min-w-48 rounded-md border bg-background px-3 text-sm"><option value="">{loading ? "加载中…" : "请选择团队"}</option>{teams.map((t) => <option key={t.id} value={t.id}>{t.name} · #{t.id}</option>)}</select><Link href="/team-login" className="text-sm underline">成员登录入口</Link></div>
-    {admin && <Card><CardHeader><CardTitle>创建团队</CardTitle></CardHeader><CardContent><form className="flex flex-wrap items-end gap-3" onSubmit={(e) => { const f = fields(e); void act(() => send("/teams", { name: f.get("name") }), "团队已创建"); }}><div className="space-y-2"><Label htmlFor="team-name">团队名称</Label><Input id="team-name" name="name" required maxLength={200} disabled={busy} /></div><Button disabled={busy}>创建</Button></form></CardContent></Card>}
+    {admin && <details className="rounded-md border p-3"><summary className="cursor-pointer font-medium">创建团队</summary><form className="mt-3 flex flex-wrap items-end gap-3" onSubmit={(e) => { const f = fields(e); void act(() => send("/teams", { name: f.get("name") }), "团队已创建"); }}><div className="space-y-2"><Label htmlFor="team-name">团队名称</Label><Input id="team-name" name="name" required maxLength={200} disabled={busy} /></div><Button disabled={busy}>创建</Button></form></details>}
     {!loading && teams.length === 0 && <p className="text-sm text-muted-foreground">还没有可访问的团队。</p>}
       {workspace && <>
+      <Card><CardHeader><CardTitle>共享任务</CardTitle><p className="text-sm text-muted-foreground">选择任务打开独立详情。会话与任务进度会按成员权限显示。</p></CardHeader><CardContent className="space-y-2">
+        {!workspace.remote_execution_available && <p className="text-sm text-muted-foreground">设备远程派工尚未开放。配对设备后不会自动启动或迁移任务。</p>}
+        {workspace.tasks.length === 0 ? <p className="text-sm text-muted-foreground">还没有授权给你的共享任务。</p> : <div className="divide-y rounded-md border">{workspace.tasks.map((task) => <div key={task.id} className="grid min-h-14 grid-cols-[5rem_minmax(0,1fr)_auto_auto] items-center gap-3 px-3 py-2 text-sm"><span className="text-muted-foreground">#{task.id}</span><Link className="truncate font-medium hover:underline" href={`/function/team/task/?team=${encodeURIComponent(selected)}&id=${task.id}`}>{task.name || `任务 ${task.id}`}</Link><Badge variant="outline">{task.kind === "reverse" ? "逆向" : "渗透"}</Badge><div className="flex items-center gap-2"><Badge variant="secondary">{task.status}</Badge><Link className="inline-flex min-h-10 items-center text-primary underline" href={`/function/team/task/?team=${encodeURIComponent(selected)}&id=${task.id}`}>查看</Link></div></div>)}</div>}
+      </CardContent></Card>
+      <details className="rounded-md border p-3"><summary className="cursor-pointer font-medium">团队设置与成员管理</summary><div className="mt-4 space-y-4">
       <TeamConnectionGuide team={selected} admin={admin} />
       {admin && <TeamLifecycle key={`${selected}:${revision}`} team={selected} name={teams.find((t) => String(t.id) === selected)?.name ?? ""} onDeleted={() => { setNotice(`团队 #${selected} 已删除`); setSelected(""); refresh(); }} />}
-      <ExecutionPanel key={selected} team={selected} tasks={workspace.tasks} members={members} memberID={workspace.member_id} admin={workspace.is_admin} />
-      <Card><CardHeader><CardTitle>共享任务</CardTitle></CardHeader><CardContent className="space-y-3">
-        {!workspace.remote_execution_available && <p className="text-sm text-muted-foreground">设备远程派工尚未开放。配对设备后不会自动启动或迁移任务。</p>}
-        {workspace.tasks.length === 0 ? <p className="text-sm text-muted-foreground">还没有授权给你的共享任务。</p> : workspace.tasks.map((task) => <div key={task.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3"><div className="flex flex-wrap items-center gap-2"><Link className="min-h-11 inline-flex items-center underline" href={`/function/team/task/?team=${encodeURIComponent(selected)}&id=${task.id}`}>{task.name || `任务 ${task.id}`}</Link><span className="text-xs text-muted-foreground">任务 #{task.id}</span>{workspace.is_admin && <Link className="min-h-11 inline-flex items-center text-xs underline" href={`/function/tasks/detail/?id=${task.id}`}>管理详情</Link>}</div><div className="flex gap-2"><Badge variant="outline">{task.kind === "reverse" ? "逆向" : "渗透"}</Badge><Badge variant="secondary">{task.status}</Badge></div></div>)}
-      </CardContent></Card>
       {admin && <Card><CardHeader><CardTitle>成员与任务授权</CardTitle></CardHeader><CardContent className="space-y-5">
         <form className="flex flex-wrap items-end gap-3" onSubmit={(e) => { const f = fields(e); const form = e.currentTarget; void act(async () => { await send(`/teams/${selected}/members`, { login: f.get("login"), password: f.get("password") }); form.reset(); }, "成员已创建"); }}><div className="space-y-2"><Label htmlFor="member-login">成员账号</Label><Input id="member-login" name="login" required maxLength={160} disabled={busy} autoComplete="off" /></div><div className="space-y-2"><Label htmlFor="member-password">初始密码</Label><Input id="member-password" name="password" type="password" required minLength={8} disabled={busy} autoComplete="new-password" /></div><Button disabled={busy}>添加成员</Button></form>
         <TeamTaskPermissions key={selected} team={selected} members={members} onSaved={() => { setNotice("任务基础权限已保存，共享任务列表已刷新；分支权限仍需独立配置。"); refresh(); }} />
@@ -89,6 +88,7 @@ export default function TeamPage() {
         {pairing && <div className="space-y-2 rounded-md border p-3" role="status"><p className="text-sm">配对码 10 分钟内有效，仅可使用一次。交给对应设备所有者。</p><code className="block break-all text-sm">{pairing}</code></div>}
         {workspace.devices.length === 0 ? <p className="text-sm text-muted-foreground">暂无已配对设备。</p> : workspace.devices.map((d) => <div key={d.id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"><span>{d.name} <span className="text-sm text-muted-foreground">设备 {d.id}</span></span><Button variant="outline" size="sm" disabled={busy || d.revoked} onClick={() => void act(() => send(`/teams/${selected}/devices/${d.id}`, undefined, "DELETE"), "设备已撤销")}>{d.revoked ? "已撤销" : "撤销配对"}</Button></div>)}
       </CardContent></Card>
+      </div></details>
     </>}
   </div>;
 }
