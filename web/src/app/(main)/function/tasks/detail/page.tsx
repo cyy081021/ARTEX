@@ -31,42 +31,15 @@ import {
   PopoverTitle,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { Separator } from "@/components/ui/separator";
-import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Spinner } from "@/components/ui/spinner";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { TabsContent } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
+import { TaskDetailFrame, taskDetailTabs } from "@/components/task-detail-frame";
+import { TaskDetailViews } from "./task-detail-views";
 import type { LLMProfile, Task } from "@/lib/types";
 
-import { AssetsTab } from "./_tabs/assets-tab";
-import { BroadcastTab } from "./_tabs/broadcast-tab";
-import { CoverageGraphTab } from "./_tabs/coverage-graph-tab";
-import { FindingsTab } from "./_tabs/findings-tab";
-import { FindingRelationsTab } from "./_tabs/finding-relations-tab";
-import { GraphTab } from "./_tabs/graph-tab";
-import { InterceptTab } from "./_tabs/intercept-tab";
-import { OverviewTab } from "./_tabs/overview-tab";
-import { ReportTab } from "./_tabs/report-tab";
-import { RetestsTab } from "./_tabs/retests-tab";
-import { ReverseTab } from "./_tabs/reverse-tab";
 import { SessionsTab } from "./_tabs/sessions-tab";
-import { WorkflowRequestsTab } from "./_tabs/workflow-requests-tab";
-
-const TABS = [
-  { value: "sessions", label: "会话" },
-  { value: "overview", label: "总览" },
-  { value: "graph", label: "探索链路" },
-  { value: "broadcast", label: "播报板" },
-  { value: "findings", label: "发现" },
-  { value: "finding-relations", label: "漏洞关联" },
-  { value: "retests", label: "复测" },
-  { value: "assets", label: "测试资产" },
-  { value: "coverage", label: "资产覆盖图" },
-  { value: "intercept", label: "拦截审批" },
-  { value: "report", label: "报告" },
-  { value: "workflow-requests", label: "跨流程协助" },
-];
 
 function taskProfileIDs(task: Task): string[] {
   if (task.llm_profile_ids && task.llm_profile_ids.length > 0) {
@@ -368,28 +341,10 @@ function TaskDetailInner() {
       {archiving ? <Spinner /> : <ArchiveIcon />}
     </Button>
   );
-  const visibleTabs = task.kind === "reverse"
-    ? [...TABS.filter((t) => !["findings", "finding-relations", "retests", "assets", "coverage", "intercept", "report"].includes(t.value)), { value: "reverse", label: "分析档案" }]
-    : TABS;
+  const visibleTabs = taskDetailTabs(task.kind);
 
   return (
-    <Tabs value={tab} onValueChange={setTab} className="flex flex-1 flex-col gap-0">
-      {/* Top fixed area */}
-      <header className="sticky top-0 z-10 flex flex-col gap-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur lg:px-6">
-        <div className="flex items-center gap-2">
-          <SidebarTrigger className="-ml-1" />
-          <Button asChild variant="ghost" size="icon" className="size-7">
-            <Link href="/function/tasks">
-              <ArrowLeftIcon />
-            </Link>
-          </Button>
-          <h1 className="min-w-0 flex-1 truncate text-sm font-semibold" title={task.name || task.description}>
-            {task.name || task.description}
-          </h1>
-          <code className="hidden rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground sm:inline">
-            {task.id}
-          </code>
-          <Separator orientation="vertical" className="mx-1 hidden h-4 sm:block" />
+    <TaskDetailFrame task={task} tab={tab} onTabChange={setTab} backHref="/function/tasks" tabs={visibleTabs} interceptPendingCount={interceptPendingCount} actions={<>
           <TaskLLMControl task={task} profiles={profiles} onUpdated={load} />
           <StatusBadge domain={terminal ? "task" : "engine"} value={terminal ? task.status : engineMode} dot />
           {canArchive ? (
@@ -427,68 +382,15 @@ function TaskDetailInner() {
               温和暂停
             </Button>
           )}
-        </div>
-        <p className="truncate text-xs text-muted-foreground">{task.goal}</p>
-        {/* Tabs */}
-        <div className="no-scrollbar min-w-0 overflow-x-auto">
-          <TabsList variant="default" className="min-w-max">
-            {visibleTabs.map((t) => (
-              <TabsTrigger key={t.value} value={t.value}>
-                {t.label}
-                {t.value === "intercept" && interceptPendingCount > 0 && (
-                  <span className="ml-1.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold leading-none text-white">
-                    {interceptPendingCount > 99 ? "99+" : interceptPendingCount}
-                  </span>
-                )}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </div>
-      </header>
-
+        </>}>
       {/* Tab content */}
       <div className="flex-1 p-4 lg:p-6">
         <TabsContent value="sessions" className="mt-0">
           <SessionsTab taskId={id} taskKind={task.kind ?? "pentest"} />
         </TabsContent>
-        <TabsContent value="workflow-requests" className="mt-0">
-          <WorkflowRequestsTab taskId={id} taskKind={task.kind === "reverse" ? "reverse" : "pentest"} />
-        </TabsContent>
-        {task.kind === "reverse" && <TabsContent value="reverse" className="mt-0">
-          <ReverseTab taskId={id} paused={paused || task.status === "paused"} onStart={() => void togglePause()} />
-        </TabsContent>}
-        <TabsContent value="overview" className="mt-0">
-          <OverviewTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="graph" className="mt-0">
-          <GraphTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="broadcast" className="mt-0">
-          <BroadcastTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="findings" className="mt-0">
-          <FindingsTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="finding-relations" className="mt-0">
-          <FindingRelationsTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="retests" className="mt-0">
-          <RetestsTab key={id} taskId={id} />
-        </TabsContent>
-        <TabsContent value="assets" className="mt-0">
-          <AssetsTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="coverage" className="mt-0">
-          <CoverageGraphTab taskId={id} coverageEnabled={task?.coverage_enabled !== false} />
-        </TabsContent>
-        <TabsContent value="intercept" className="mt-0">
-          <InterceptTab taskId={id} />
-        </TabsContent>
-        <TabsContent value="report" className="mt-0">
-          <ReportTab taskId={id} />
-        </TabsContent>
+        <TaskDetailViews taskId={id} kind={task.kind} paused={paused || task.status === "paused"} coverageEnabled={task?.coverage_enabled !== false} onStart={() => void togglePause()} />
       </div>
-    </Tabs>
+    </TaskDetailFrame>
   );
 }
 

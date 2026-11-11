@@ -7,7 +7,7 @@ import { toast } from "sonner";
 
 import { FindingRelationGraph, RELATION_LABELS } from "@/components/finding-relation-graph";
 import { Button } from "@/components/ui/button";
-import { api } from "@/lib/api";
+import { useTaskView } from "@/lib/task-view-context";
 import type {
   FindingRelationEdge,
   FindingRelationKind,
@@ -17,6 +17,7 @@ import type {
 } from "@/lib/types";
 
 export function FindingRelationsTab({ taskId }: { taskId: string }) {
+  const { api, readOnly } = useTaskView();
   const [data, setData] = React.useState<FindingRelations>({ nodes: [], edges: [] });
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState("");
@@ -191,7 +192,7 @@ export function FindingRelationsTab({ taskId }: { taskId: string }) {
             </p>
           )}
         </div>
-        <Button
+        {!readOnly && <Button
           variant="outline"
           className="min-h-10"
           disabled={reviewBusy || !!review?.running || data.nodes.length === 0}
@@ -201,7 +202,7 @@ export function FindingRelationsTab({ taskId }: { taskId: string }) {
             <Loader2 className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
           )}
           {reviewBusy || review?.running ? "检查中…" : "检查归类与关联"}
-        </Button>
+        </Button>}
       </div>
       {loadError && (
         <p role="alert" className="text-sm text-destructive">
@@ -228,11 +229,12 @@ export function FindingRelationsTab({ taskId }: { taskId: string }) {
           taskId={taskId}
           data={data}
           busy={busy}
+          readOnly={readOnly}
           onRemove={(edge) => void removeRelation(edge)}
           onAdd={openForm}
         />
       )}
-      <details ref={formDetails} className="scroll-mt-6 rounded-xl border bg-card">
+      {!readOnly && <details ref={formDetails} className="scroll-mt-6 rounded-xl border bg-card">
         <summary className="cursor-pointer rounded-xl px-5 py-4 text-sm font-medium focus-visible:outline-2 focus-visible:outline-ring">
           <Plus className="mr-2 inline size-4" aria-hidden="true" />
           手动添加关系
@@ -323,7 +325,7 @@ export function FindingRelationsTab({ taskId }: { taskId: string }) {
             </form>
           )}
         </div>
-      </details>
+      </details>}
     </div>
   );
 }

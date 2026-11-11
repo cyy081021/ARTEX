@@ -98,7 +98,10 @@ func TestTeamTaskDetailReadScopeProjectionAndRevocation(t *testing.T) {
 		if err = json.Unmarshal(object["task"], &taskObject); err != nil {
 			t.Fatal(err)
 		}
-		allowedTask := map[string]bool{"id": true, "name": true, "kind": true, "goal": true, "status": true, "paused": true, "queued": true, "created_at": true, "completed_at": true}
+		allowedTask := map[string]bool{"id": true, "name": true, "kind": true, "goal": true, "status": true, "paused": true, "queued": true, "created_at": true, "completed_at": true, "coverage_enabled": true}
+		if string(taskObject["coverage_enabled"]) != "true" && string(taskObject["coverage_enabled"]) != "false" {
+			t.Error("coverage_enabled must be a boolean")
+		}
 		for key := range taskObject {
 			if !allowedTask[key] {
 				t.Errorf("unexpected task projection field %q", key)

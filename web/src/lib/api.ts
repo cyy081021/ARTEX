@@ -211,26 +211,6 @@ export function sseUrl(path: string): string {
   return token ? `${base}${path}${sep}token=${encodeURIComponent(token)}` : `${base}${path}`;
 }
 
-const get = <T>(p: string) => http<T>(p);
-const post = <T>(p: string, body?: unknown) =>
-  http<T>(p, { method: "POST", body: body ? JSON.stringify(body) : undefined });
-const put = <T>(p: string, body?: unknown) =>
-  http<T>(p, { method: "PUT", body: body ? JSON.stringify(body) : undefined });
-const patch = <T>(p: string, body?: unknown) =>
-  http<T>(p, { method: "PATCH", body: body ? JSON.stringify(body) : undefined });
-const del = <T>(p: string, body?: unknown) =>
-  http<T>(p, { method: "DELETE", body: body ? JSON.stringify(body) : undefined });
-const downloadBlob = async (path: string, fallbackName: string) => {
-  const token = getToken();
-  const r = await fetch(`/api${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
-  if (!r.ok) throw new Error(`下载失败(${r.status})`);
-  const blob = await r.blob();
-  const disposition = r.headers.get("Content-Disposition") ?? "";
-  const filename = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i)?.[1] ?? fallbackName;
-  const url = URL.createObjectURL(blob); const a = document.createElement("a");
-  a.href = url; a.download = decodeURIComponent(filename); document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-};
-
 // Go serializes nil slices as JSON null — coerce to [].
 const arr = <T>(x: T[] | null | undefined): T[] => x ?? [];
 const tq = (task?: string, sep: "?" | "&" = "?") => (task ? `${sep}task=${encodeURIComponent(task)}` : "");
@@ -256,7 +236,29 @@ function interceptPageQuery(page: number, size: number, filter: InterceptApprova
   return query.toString();
 }
 
-export const api = {
+export function createAPI(request: typeof http = http, readURL: (path: string) => string = (path) => path) {
+const http = request;
+const get = <T>(p: string) => http<T>(p);
+const post = <T>(p: string, body?: unknown) =>
+  http<T>(p, { method: "POST", body: body ? JSON.stringify(body) : undefined });
+const put = <T>(p: string, body?: unknown) =>
+  http<T>(p, { method: "PUT", body: body ? JSON.stringify(body) : undefined });
+const patch = <T>(p: string, body?: unknown) =>
+  http<T>(p, { method: "PATCH", body: body ? JSON.stringify(body) : undefined });
+const del = <T>(p: string, body?: unknown) =>
+  http<T>(p, { method: "DELETE", body: body ? JSON.stringify(body) : undefined });
+const downloadBlob = async (path: string, fallbackName: string) => {
+  const token = getToken();
+  const r = await fetch(`/api${readURL(path)}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!r.ok) throw new Error(`下载失败(${r.status})`);
+  const blob = await r.blob();
+  const disposition = r.headers.get("Content-Disposition") ?? "";
+  const filename = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i)?.[1] ?? fallbackName;
+  const url = URL.createObjectURL(blob); const a = document.createElement("a");
+  a.href = url; a.download = decodeURIComponent(filename); document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+};
+
+return {
   // 后端应用版本号（release 时由 ldflags 注入，默认 "dev"）。
   health: () => get<{ ok: boolean; service: string; version: string }>("/health"),
 
@@ -639,7 +641,7 @@ export const api = {
       for (const [k, v] of findingFilterParams(opts.filters)) p.set(k, v);
     }
     const token = getToken();
-    const r = await fetch(`/api/exploration/findings/export?${p.toString()}`, {
+    const r = await fetch(`/api${readURL(`/exploration/findings/export?${p.toString()}`)}`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!r.ok) throw new Error(`export: ${r.status}`);
@@ -713,7 +715,7 @@ export const api = {
   ) => {
     const token = getToken();
     const response = await fetch(
-      `/api/exploration/findings/${id}/traffic/${bindingId}/body?side=${side}&download=1${contextTask ? `&context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      `/api${readURL(`/exploration/findings/${id}/traffic/${bindingId}/body?side=${side}&download=1${contextTask ? `&context_task=${encodeURIComponent(contextTask)}` : ""}`)}`,
       { headers: token ? { Authorization: `Bearer ${token}` } : {} },
     );
     if (!response.ok) {
@@ -962,7 +964,7 @@ export const api = {
   report: async (task?: string) => {
     if (MOCK) return mockReport(task);
     const token = getToken();
-    const r = await fetch(`/api/report${tq(task)}`, {
+    const r = await fetch(`/api${readURL(`/report${tq(task)}`)}`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!r.ok) throw new Error(`report: ${r.status}`);
@@ -1414,3 +1416,7 @@ export const api = {
   applyUpdate: () => post<{ ok: boolean; target: string }>(`/update/apply`),
   rollbackUpdate: () => post<{ ok: boolean }>(`/update/rollback`),
 };
+
+}
+
+export const api = createAPI();

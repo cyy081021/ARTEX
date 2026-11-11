@@ -15,7 +15,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { api } from "@/lib/api";
+import { useTaskView } from "@/lib/task-view-context";
 import type { FindingRetest } from "@/lib/types";
 
 const statusLabels = {
@@ -42,6 +42,8 @@ export function FindingRetestPanel({
   readOnly?: boolean;
   onCompleted?: () => void;
 }) {
+  const { api, readOnly: contextReadOnly } = useTaskView();
+  readOnly = readOnly || contextReadOnly;
   const [items, setItems] = React.useState<FindingRetest[] | null>(null);
   const [error, setError] = React.useState("");
   const [open, setOpen] = React.useState(false);
@@ -118,7 +120,7 @@ export function FindingRetestPanel({
           <Empty>
             <EmptyHeader>
               <EmptyTitle>暂无复测记录</EmptyTitle>
-              <EmptyDescription>修复部署完成后，可发起复测并比较新旧证据。</EmptyDescription>
+              <EmptyDescription>{readOnly ? "复测完成后，这里会显示结论与证据。" : "修复部署完成后，可发起复测并比较新旧证据。"}</EmptyDescription>
             </EmptyHeader>
           </Empty>
         ) : null}

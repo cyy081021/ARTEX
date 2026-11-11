@@ -29,7 +29,7 @@ import { Input } from "@/components/ui/input";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
-import { api } from "@/lib/api";
+import { useTaskView } from "@/lib/task-view-context";
 import type {
   AssetInterceptKind,
   AssetInterceptRule,
@@ -106,6 +106,7 @@ function StatCard({
 }
 
 export function OverviewTab({ taskId }: { taskId: string }) {
+  const { api, readOnly } = useTaskView();
   const [task, setTask] = React.useState<Task | null>(null);
   const [stats, setStats] = React.useState<Stats | null>(null);
   const [intents, setIntents] = React.useState<TaskNode[]>([]);
@@ -478,7 +479,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           <CardTitle className="flex items-center gap-2 text-base">
             <TargetIcon className="size-4 text-primary" /> 任务描述与目标
           </CardTitle>
-          {task && !task.paused && task.status !== "paused" && !["done", "failed", "timeout"].includes(task.status) && (
+          {!readOnly && task && !task.paused && task.status !== "paused" && !["done", "failed", "timeout"].includes(task.status) && (
             <Button size="sm" variant="outline" onClick={() => void pauseAfterTool()} disabled={pausingAfterTool}>
               {pausingAfterTool ? "正在请求…" : "温和暂停"}
             </Button>
@@ -508,7 +509,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           {/* 新增表单 */}
-          <div className="flex flex-wrap items-center gap-2">
+          {!readOnly && <div className="flex flex-wrap items-center gap-2">
             <Input
               className="h-7 min-w-56 flex-1 text-sm"
               placeholder="新增目标，如『拿到管理员账号的越权访问』"
@@ -533,7 +534,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               <PlusIcon className="size-3.5" /> 添加
             </Button>
             {goalErr && <span className="text-xs text-red-500">{goalErr}</span>}
-          </div>
+          </div>}
           {/* 目标列表 */}
           {goals.length > 0 ? (
             <div className="flex flex-col gap-1.5">
@@ -562,7 +563,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       }}
                       disabled={goalBusy}
                     />
-                    <Button
+                    {!readOnly && <Button
                       size="sm"
                       variant="ghost"
                       className="h-6 shrink-0 px-1.5"
@@ -570,8 +571,8 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       onClick={() => void saveEditGoal(g)}
                     >
                       <CheckIcon className="size-3.5 text-emerald-500" />
-                    </Button>
-                    <Button
+                    </Button>}
+                    {!readOnly && <Button
                       size="sm"
                       variant="ghost"
                       className="h-6 shrink-0 px-1.5"
@@ -579,7 +580,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       onClick={cancelEditGoal}
                     >
                       <XIcon className="size-3.5" />
-                    </Button>
+                    </Button>}
                   </div>
                 ) : (
                   <div key={g.id} className="flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm">
@@ -590,7 +591,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                         {g.vulnclass}
                       </span>
                     )}
-                    <Button
+                    {!readOnly && <Button
                       size="sm"
                       variant="ghost"
                       className="h-6 shrink-0 px-1.5"
@@ -598,8 +599,8 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       onClick={() => startEditGoal(g)}
                     >
                       <PencilIcon className="size-3.5" />
-                    </Button>
-                    <Button
+                    </Button>}
+                    {!readOnly && <Button
                       size="sm"
                       variant="ghost"
                       className="h-6 shrink-0 px-1.5"
@@ -607,7 +608,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       onClick={() => void removeGoal(g)}
                     >
                       <Trash2Icon className="size-3.5 text-red-500" />
-                    </Button>
+                    </Button>}
                   </div>
                 ),
               )}
@@ -631,7 +632,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           {/* 新增表单 */}
-          <div className="flex flex-wrap items-center gap-2">
+          {!readOnly && <div className="flex flex-wrap items-center gap-2">
             <NativeSelect
               size="sm"
               value={conKind}
@@ -660,7 +661,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               <PlusIcon className="size-3.5" /> 添加
             </Button>
             {conErr && <span className="text-xs text-red-500">{conErr}</span>}
-          </div>
+          </div>}
           {/* 约束列表 */}
           {constraints.length > 0 ? (
             <div className="flex flex-col gap-1.5">
@@ -687,7 +688,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       disabled={conBusy}
                       autoFocus
                     />
-                    <Button
+                    {!readOnly && <Button
                       size="sm"
                       variant="ghost"
                       className="h-6 shrink-0 px-1.5"
@@ -695,7 +696,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       onClick={() => void saveEditConstraint(c)}
                     >
                       <CheckIcon className="size-3.5 text-emerald-500" />
-                    </Button>
+                    </Button>}
                     <Button
                       size="sm"
                       variant="ghost"
@@ -720,7 +721,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       {c.kind === "allow" ? "允许" : c.kind === "deny" ? "禁止" : "规则"}
                     </span>
                     <span className="min-w-0 flex-1 break-words">{c.text}</span>
-                    <Button
+                    {!readOnly && <Button
                       size="sm"
                       variant="ghost"
                       className="h-6 shrink-0 px-1.5"
@@ -728,8 +729,8 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       onClick={() => startEditConstraint(c)}
                     >
                       <PencilIcon className="size-3.5" />
-                    </Button>
-                    <Button
+                    </Button>}
+                    {!readOnly && <Button
                       size="sm"
                       variant="ghost"
                       className="h-6 shrink-0 px-1.5"
@@ -737,7 +738,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       onClick={() => void removeConstraint(c)}
                     >
                       <Trash2Icon className="size-3.5 text-red-500" />
-                    </Button>
+                    </Button>}
                   </div>
                 ),
               )}
@@ -866,7 +867,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           {/* 新增表单 */}
-          <div className="flex flex-wrap items-center gap-2">
+          {!readOnly && <div className="flex flex-wrap items-center gap-2">
             <NativeSelect
               size="sm"
               value={scopeKind}
@@ -909,7 +910,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               <PlusIcon className="size-3.5" /> 添加
             </Button>
             {scopeErr && <span className="text-xs text-red-500">{scopeErr}</span>}
-          </div>
+          </div>}
           {/* 范围列表 */}
           {scope.length > 0 ? (
             <>
@@ -933,7 +934,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                     </span>
                     <span className="min-w-0 flex-1 truncate font-mono text-xs">{scopeValue(row)}</span>
                     <span className="text-muted-foreground shrink-0 text-xs">{SCOPE_SOURCE_LABELS[row.source]}</span>
-                    {row.task_id.toString() === taskId ? (
+                    {row.task_id.toString() === taskId && !readOnly ? (
                       <Button
                         size="sm"
                         variant="ghost"
@@ -942,9 +943,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       >
                         <Trash2Icon className="size-3.5 text-red-500" />
                       </Button>
-                    ) : (
+                    ) : row.task_id.toString() !== taskId ? (
                       <span className="text-muted-foreground shrink-0 text-xs">继承</span>
-                    )}
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -1072,17 +1073,17 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               <AlertTriangleIcon className="size-4 text-red-500" /> 被拦/出错意图
               <span className="text-xs font-normal text-muted-foreground">（共 {blocked.length} 条，可重跑）</span>
             </CardTitle>
-            <Button size="sm" variant="outline" disabled={rerunning.has("__all__")} onClick={() => void rerunAll()}>
+            {!readOnly && <Button size="sm" variant="outline" disabled={rerunning.has("__all__")} onClick={() => void rerunAll()}>
               <RefreshCwIcon className={`size-3.5 ${rerunning.has("__all__") ? "animate-spin" : ""}`} />
               全部重跑
-            </Button>
+            </Button>}
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
             {blocked.slice(0, 20).map((i) => (
               <div key={i.id} className="flex items-center gap-2 text-sm">
                 <StatusBadge domain="intent" value={i.state} />
                 <span className="min-w-0 flex-1 truncate">{i.payload}</span>
-                <Button
+                {!readOnly && <Button
                   size="sm"
                   variant="ghost"
                   className="h-7 shrink-0 px-2 text-xs"
@@ -1091,7 +1092,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                 >
                   <RefreshCwIcon className={`size-3 ${rerunning.has(i.id) ? "animate-spin" : ""}`} />
                   重跑
-                </Button>
+                </Button>}
               </div>
             ))}
             {blocked.length > 20 && (
@@ -1131,6 +1132,7 @@ const TASK_RULE_KIND_LABEL: Record<AssetInterceptKind, string> = Object.fromEntr
 // TaskInterceptRulesCard 在任务详情总览里管理「任务级资产拦截 / 允许规则」：
 // 列表 + 新增 + 行内编辑 + 删除 + 启用开关。规则仅本任务生效，不进全局表。
 function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
+  const { api, readOnly } = useTaskView();
   const [rules, setRules] = React.useState<AssetInterceptRule[]>([]);
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState("");
@@ -1240,7 +1242,7 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         {/* 新增表单 */}
-        <div className="flex flex-wrap items-center gap-2">
+        {!readOnly && <div className="flex flex-wrap items-center gap-2">
           <NativeSelect size="sm" value={newAction} onChange={(e) => setNewAction(e.target.value as "block" | "allow")}>
             <NativeSelectOption value="block">拦截</NativeSelectOption>
             <NativeSelectOption value="allow">允许</NativeSelectOption>
@@ -1273,7 +1275,7 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
             <PlusIcon className="size-3.5" /> 添加
           </Button>
           {err && <span className="text-xs text-red-500">{err}</span>}
-        </div>
+        </div>}
         {/* 规则列表 */}
         {rules.length > 0 ? (
           <div className="flex flex-col gap-1.5">
@@ -1352,8 +1354,8 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
                   {r.note && (
                     <span className="text-muted-foreground max-w-[120px] shrink-0 truncate text-xs">{r.note}</span>
                   )}
-                  <Switch checked={r.enabled} onCheckedChange={() => void toggle(r)} />
-                  <Button
+                  {!readOnly ? <Switch checked={r.enabled} onCheckedChange={() => void toggle(r)} /> : <span className="text-muted-foreground text-xs">{r.enabled ? "已启用" : "已停用"}</span>}
+                  {!readOnly && <Button
                     size="sm"
                     variant="ghost"
                     className="h-6 shrink-0 px-1.5"
@@ -1361,8 +1363,8 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
                     onClick={() => startEdit(r)}
                   >
                     <PencilIcon className="size-3.5" />
-                  </Button>
-                  <Button
+                  </Button>}
+                  {!readOnly && <Button
                     size="sm"
                     variant="ghost"
                     className="h-6 shrink-0 px-1.5"
@@ -1370,7 +1372,7 @@ function TaskInterceptRulesCard({ taskId }: { taskId: string }) {
                     onClick={() => void remove(r)}
                   >
                     <Trash2Icon className="size-3.5 text-red-500" />
-                  </Button>
+                  </Button>}
                 </div>
               ),
             )}

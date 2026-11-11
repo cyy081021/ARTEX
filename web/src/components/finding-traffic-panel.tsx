@@ -24,7 +24,7 @@ import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import { api } from "@/lib/api";
+import { useTaskView } from "@/lib/task-view-context";
 import type { FindingTraffic, FindingTrafficBinding, TrafficEvidenceRole } from "@/lib/types";
 
 const ROLES: Record<TrafficEvidenceRole, string> = {
@@ -45,6 +45,8 @@ export function FindingTrafficPanel({
   readOnly?: boolean;
   onChanged: () => void;
 }) {
+  const { api, readOnly: contextReadOnly } = useTaskView();
+  readOnly = readOnly || contextReadOnly;
   const [data, setData] = React.useState<FindingTraffic | null>(null);
   const [error, setError] = React.useState("");
   const [adding, setAdding] = React.useState(false);
@@ -106,7 +108,7 @@ export function FindingTrafficPanel({
                 绑定流量
               </Button>
             ) : (
-              <Badge variant="outline">继承证据 · 只读</Badge>
+              <Badge variant="outline">{contextReadOnly ? "共享证据 · 只读" : "继承证据 · 只读"}</Badge>
             )}
           </div>
           <CardDescription>按复现顺序组织请求与响应。清理原始流量后，已绑定证据仍然保留。</CardDescription>

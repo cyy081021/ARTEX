@@ -28,7 +28,7 @@ function isFullBleed(pathname: string) {
   // 静态导出开了 trailingSlash，列表页自身的 pathname 是 "/function/tasks/"，
   // 先去掉尾斜杠再判前缀，否则列表页会被误判成详情页而丢掉全局头部。
   const normalized = p.replace(/\/+$/, "");
-  return normalized.startsWith("/function/tasks/");
+  return normalized.startsWith("/function/tasks/") || normalized === "/function/team/task";
 }
 
 export function MainContent({ children }: { children: ReactNode }) {

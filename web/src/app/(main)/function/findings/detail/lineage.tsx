@@ -3,13 +3,14 @@
 import * as React from "react";
 
 import { ExplorationGraph } from "@/components/exploration-graph";
-import { api } from "@/lib/api";
+import { useTaskView } from "@/lib/task-view-context";
 import type { Edge, TaskNode } from "@/lib/types";
 
 // FindingLineageView renders the exploration sub-graph from the task's initial
 // node down to this finding's node — the same 攻击链路图 canvas as the task graph,
 // scoped to just this finding's lineage.
 export function FindingLineageView({ findingId }: { findingId: string }) {
+  const { api } = useTaskView();
   const [nodes, setNodes] = React.useState<TaskNode[]>([]);
   const [edges, setEdges] = React.useState<Edge[]>([]);
   const [loaded, setLoaded] = React.useState(false);

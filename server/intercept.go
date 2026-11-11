@@ -246,6 +246,10 @@ func (s *Server) interceptGetOne(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) interceptListTaskItems(w http.ResponseWriter, r *http.Request) {
+	s.interceptTaskItems(w, r, false)
+}
+
+func (s *Server) interceptTaskItems(w http.ResponseWriter, r *http.Request, shared bool) {
 	pg := s.pg(w)
 	if pg == nil {
 		return
@@ -270,6 +274,11 @@ func (s *Server) interceptListTaskItems(w http.ResponseWriter, r *http.Request) 
 		if items == nil {
 			items = []db.InterceptApprovalRow{}
 		}
+		if shared {
+			for i := range items {
+				items[i].ToolInput = nil
+			}
+		}
 		writeJSON(w, 200, map[string]any{"items": items, "total": len(items)})
 		return
 	}
@@ -281,6 +290,11 @@ func (s *Server) interceptListTaskItems(w http.ResponseWriter, r *http.Request) 
 	}
 	if items == nil {
 		items = []db.InterceptApprovalRow{}
+	}
+	if shared {
+		for i := range items {
+			items[i].ToolInput = nil
+		}
 	}
 	writeJSON(w, 200, map[string]any{"items": items, "total": total, "page": page, "page_size": size})
 }

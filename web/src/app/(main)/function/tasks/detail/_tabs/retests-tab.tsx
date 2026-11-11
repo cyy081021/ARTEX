@@ -14,7 +14,7 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api } from "@/lib/api";
+import { useTaskView } from "@/lib/task-view-context";
 import type { Finding, FindingsPage } from "@/lib/types";
 
 const PAGE_SIZE = 20;
@@ -24,6 +24,7 @@ function findingLabel(finding: Finding) {
 }
 
 export function RetestsTab({ taskId }: { taskId: string }) {
+  const { api, readOnly, findingHref } = useTaskView();
   const [page, setPage] = React.useState(1);
   const [data, setData] = React.useState<FindingsPage | null>(null);
   const [selectedId, setSelectedId] = React.useState("");
@@ -84,7 +85,7 @@ export function RetestsTab({ taskId }: { taskId: string }) {
         <Card className="min-w-0">
           <CardHeader>
             <CardTitle>选择漏洞{data ? ` · ${data.total}` : ""}</CardTitle>
-            <CardDescription>查看本任务漏洞的复测记录，或发起新的复测。</CardDescription>
+            <CardDescription>{readOnly ? "查看本任务漏洞的复测记录与证据。" : "查看本任务漏洞的复测记录，或发起新的复测。"}</CardDescription>
           </CardHeader>
           <CardContent className="flex max-h-[32rem] flex-col overflow-y-auto">
             {!loaded && !error ? <Skeleton className="h-24 w-full" /> : null}
@@ -147,7 +148,7 @@ export function RetestsTab({ taskId }: { taskId: string }) {
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <h2 className="min-w-0 flex-1 break-words font-medium">{findingLabel(selected)}</h2>
                 <Button asChild variant="ghost" size="sm">
-                  <Link href={`/function/findings/detail?id=${selected.finding_id || selected.id}`}>
+                  <Link href={findingHref(selected.finding_id || selected.id)}>
                     漏洞详情 <ArrowUpRightIcon data-icon="inline-end" />
                   </Link>
                 </Button>

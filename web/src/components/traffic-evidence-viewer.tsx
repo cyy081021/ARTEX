@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { api } from "@/lib/api";
+import { useTaskView } from "@/lib/task-view-context";
 import type { FindingTrafficDetail, TrafficDetail } from "@/lib/types";
 
 export function TrafficEvidenceViewer({
@@ -24,6 +24,7 @@ export function TrafficEvidenceViewer({
   contextTask?: string;
   onClose: () => void;
 }) {
+  const { api } = useTaskView();
   const [detail, setDetail] = React.useState<FindingTrafficDetail | null>(null);
   const [error, setError] = React.useState("");
   const [busy, setBusy] = React.useState(false);
@@ -124,6 +125,7 @@ export function TrafficEvidenceViewer({
 }
 
 export function CapturedTrafficViewer({ id, onClose }: { id: string | null; onClose: () => void }) {
+  const { api } = useTaskView();
   const [detail, setDetail] = React.useState<TrafficDetail | null>(null);
   const [error, setError] = React.useState("");
   React.useEffect(() => {

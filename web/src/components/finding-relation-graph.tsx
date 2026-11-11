@@ -22,6 +22,7 @@ import { ArrowRight, Bug, Check, ExternalLink, Focus, GitBranch, Maximize2, Sear
 
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
+import { useTaskView } from "@/lib/task-view-context";
 import { Input } from "@/components/ui/input";
 import {
   analyzeFindingRelations,
@@ -90,10 +91,11 @@ function FindingNode({ data, selected }: NodeProps<FindingFlowNode>) {
 const nodeTypes = { finding: FindingNode };
 
 function FindingLink({ taskId, node }: { taskId: string; node: FindingRelationNode }) {
+  const { findingHref } = useTaskView();
   return (
     <Button asChild variant="outline" className="min-h-10 w-full">
       <Link
-        href={`/function/findings/detail?id=${encodeURIComponent(node.id)}&context_task=${encodeURIComponent(taskId)}`}
+        href={findingHref(node.id, taskId)}
       >
         打开漏洞详情
         <ExternalLink className="size-4" aria-hidden="true" />
@@ -108,12 +110,14 @@ export function FindingRelationGraph({
   busy,
   onRemove,
   onAdd,
+  readOnly = false,
 }: {
   taskId: string;
   data: FindingRelations;
   busy: boolean;
   onRemove: (edge: FindingRelationEdge) => void;
   onAdd: (source?: string) => void;
+  readOnly?: boolean;
 }) {
   const [query, setQuery] = React.useState("");
   const [kind, setKind] = React.useState("all");
@@ -227,6 +231,7 @@ export function FindingRelationGraph({
     setSelection({});
   }
   function addRelation(id?: string) {
+    if (readOnly) return;
     setExpanded(false);
     onAdd(id);
   }
@@ -243,10 +248,10 @@ export function FindingRelationGraph({
           <span className="text-muted-foreground">{all.isolatedIds.length} 个尚无关联</span>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" className="min-h-10" onClick={() => addRelation(selectedNode?.id)}>
+          {!readOnly && <Button variant="outline" className="min-h-10" onClick={() => addRelation(selectedNode?.id)}>
             <GitBranch aria-hidden="true" />
             添加关系
-          </Button>
+          </Button>}
           <Button variant="ghost" className="min-h-10" aria-pressed={expanded} onClick={() => setExpanded(!expanded)}>
             {expanded ? <X aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}
             {expanded ? "退出展开" : "展开画布"}
@@ -439,7 +444,7 @@ export function FindingRelationGraph({
                     ? "调整关系类型、验证状态或搜索条件后再查看。"
                     : "漏洞清单不等于利用链。归类检查或人工补充关系后，这里会按前置、能力与证据关系展开；未关联漏洞保留在左侧列表。"}
                 </p>
-                {!validEdges.length && (
+                {!readOnly && !validEdges.length && (
                   <Button variant="outline" className="min-h-10" onClick={() => addRelation(selectedNode?.id)}>
                     添加第一条关系
                     <ArrowRight aria-hidden="true" />
@@ -471,9 +476,9 @@ export function FindingRelationGraph({
               <h3 className="mb-3 break-words text-sm font-medium leading-6">{selectedNode.name}</h3>
               <div className="flex flex-wrap gap-2">
                 <FindingLink taskId={taskId} node={selectedNode} />
-                <Button variant="ghost" className="min-h-10" onClick={() => addRelation(selectedNode.id)}>
+                {!readOnly && <Button variant="ghost" className="min-h-10" onClick={() => addRelation(selectedNode.id)}>
                   以此漏洞添加关系
-                </Button>
+                </Button>}
               </div>
             </div>
             <div className="min-w-0">
@@ -514,9 +519,9 @@ export function FindingRelationGraph({
                 )}
                 {RELATION_LABELS[selectedEdge.kind]} · {selectedEdge.status === "verified" ? "已验证" : "待验证"}
               </span>
-              <Button variant="destructive" className="min-h-10" disabled={busy} onClick={() => onRemove(selectedEdge)}>
+              {!readOnly && <Button variant="destructive" className="min-h-10" disabled={busy} onClick={() => onRemove(selectedEdge)}>
                 删除此关系
-              </Button>
+              </Button>}
             </div>
             <div className="flex flex-wrap items-center gap-2 text-sm">
               <button

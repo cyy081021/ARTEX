@@ -13,7 +13,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger } from "@/components/ui/select";
-import { api } from "@/lib/api";
+import { useTaskView } from "@/lib/task-view-context";
 import { useStoredSortPreference } from "@/lib/sort-preference";
 import { statusMeta } from "@/lib/status";
 import type { Finding, FindingReviewStatus, FindingStatus } from "@/lib/types";
@@ -51,6 +51,7 @@ function Row({
   contextTaskId: string;
   onStatus: (f: Finding, next: FindingStatus) => void;
 }) {
+  const { readOnly, findingHref } = useTaskView();
   const [open, setOpen] = React.useState(false);
   return (
     <div className="border-b last:border-b-0">
@@ -91,7 +92,7 @@ function Row({
             {f.assets.length > 2 && <span className="text-xs text-muted-foreground">+{f.assets.length - 2}</span>}
           </div>
         )}
-        {f.finding_id && !f.inherited ? (
+        {f.finding_id && !f.inherited && !readOnly ? (
           <Select value={f.status} onValueChange={(v) => onStatus(f, v as FindingStatus)}>
             <SelectTrigger size="sm" className="h-7 w-28 shrink-0 border-none px-1 shadow-none focus-visible:ring-0">
               <StatusBadge domain="finding" value={f.status} dot />
@@ -114,11 +115,7 @@ function Row({
         </span>
         {f.finding_id && (
           <Link
-            href={
-              f.inherited
-                ? `/function/findings/detail?id=${f.finding_id}&context_task=${contextTaskId}`
-                : `/function/findings/detail?id=${f.finding_id}`
-            }
+            href={findingHref(f.finding_id, f.inherited ? contextTaskId : undefined)}
             className="text-muted-foreground hover:text-primary inline-flex shrink-0 items-center gap-0.5 text-xs"
             title="查看漏洞详情"
           >
@@ -140,6 +137,7 @@ function Row({
 }
 
 export function FindingsTab({ taskId }: { taskId: string }) {
+  const { api, readOnly, findingHref } = useTaskView();
   const [findings, setFindings] = React.useState<Finding[]>([]);
   const [review, setReview] = React.useState<FindingReviewStatus | null>(null);
   const [reviewError, setReviewError] = React.useState("");
@@ -281,7 +279,7 @@ export function FindingsTab({ taskId }: { taskId: string }) {
               </p>
             )}
           </div>
-          <label className="flex items-center gap-2 text-xs">
+          {!readOnly && <label className="flex items-center gap-2 text-xs">
             <input
               type="checkbox"
               checked={review?.enabled ?? false}
@@ -289,8 +287,8 @@ export function FindingsTab({ taskId }: { taskId: string }) {
               onChange={(event) => void updateReviewConfig({ enabled: event.target.checked })}
             />
             自动检查
-          </label>
-          <label className="flex items-center gap-2 text-xs">
+          </label>}
+          {!readOnly && <label className="flex items-center gap-2 text-xs">
             触发条数
             <Input
               type="number"
@@ -305,11 +303,11 @@ export function FindingsTab({ taskId }: { taskId: string }) {
                 if (size !== review?.batch_size) void updateReviewConfig({ batch_size: size });
               }}
             />
-          </label>
-          {!!review?.report_error && <Button size="sm" variant="outline" onClick={() => void retryReportRewrites()} disabled={rewriteRetryBusy}>{rewriteRetryBusy ? "提交中…" : "重试失败报告"}</Button>}
-          <Button size="sm" onClick={() => void runReview()} disabled={reviewBusy || !!review?.running}>
+          </label>}
+          {!readOnly && !!review?.report_error && <Button size="sm" variant="outline" onClick={() => void retryReportRewrites()} disabled={rewriteRetryBusy}>{rewriteRetryBusy ? "提交中…" : "重试失败报告"}</Button>}
+          {!readOnly && <Button size="sm" onClick={() => void runReview()} disabled={reviewBusy || !!review?.running}>
             {reviewBusy || review?.running ? "检查中…" : "立即检查 / 归类"}
-          </Button>
+          </Button>}
         </CardContent>
       </Card>
       <Card className="overflow-hidden py-0">

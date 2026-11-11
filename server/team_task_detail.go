@@ -20,7 +20,8 @@ func (s *Server) teamTaskDetail(w http.ResponseWriter, r *http.Request) {
 	task := map[string]any{
 		"id": t.ID, "name": t.Name, "kind": t.Kind, "goal": t.Goal,
 		"status": t.Status, "paused": t.Paused, "queued": t.Queued,
-		"created_at": t.CreatedAt.Format(time.RFC3339),
+		"coverage_enabled": t.CoverageEnabled,
+		"created_at":       t.CreatedAt.Format(time.RFC3339),
 	}
 	if t.CompletedAt != nil {
 		task["completed_at"] = t.CompletedAt.Format(time.RFC3339)

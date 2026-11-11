@@ -12,7 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
-import { api } from "@/lib/api";
+import { useTaskView } from "@/lib/task-view-context";
 import type {
   ReverseArtifact,
   ReverseConclusion,
@@ -32,6 +32,7 @@ const formatBytes = (n: number) =>
   n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / (1024 * 1024)).toFixed(1)} MB`;
 
 export function ReverseTab({ taskId, paused, onStart }: { taskId: string; paused: boolean; onStart: () => void }) {
+  const { api, readOnly } = useTaskView();
   const [artifacts, setArtifacts] = React.useState<ReverseArtifact[]>([]);
   const [conclusions, setConclusions] = React.useState<ReverseConclusion[]>([]);
   const [readiness, setReadiness] = React.useState<ReverseReadiness | null>(null);
@@ -61,7 +62,7 @@ export function ReverseTab({ taskId, paused, onStart }: { taskId: string; paused
       const [a, c, r] = await Promise.all([
         api.reverseArtifacts(taskId),
         api.reverseConclusions(taskId),
-        api.reverseReadiness(),
+        readOnly ? Promise.resolve(null) : api.reverseReadiness(),
       ]);
       setArtifacts(a);
       setConclusions(c);
@@ -71,7 +72,7 @@ export function ReverseTab({ taskId, paused, onStart }: { taskId: string; paused
     } finally {
       setLoading(false);
     }
-  }, [taskId]);
+  }, [taskId, api, readOnly]);
   React.useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -79,7 +80,10 @@ export function ReverseTab({ taskId, paused, onStart }: { taskId: string; paused
     let alive = true;
     setRuntimeLoading(true);
     setRuntimeLoaded(false);
-    void Promise.all([api.reverseRuntimeProfiles(), api.reverseRuntime(taskId)])
+    const loadRuntime = readOnly
+      ? api.reverseRuntime(taskId).then((state): [ReverseRuntimeProfile[], typeof state] => [[], state])
+      : Promise.all([api.reverseRuntimeProfiles(), api.reverseRuntime(taskId)]);
+    void loadRuntime
       .then(([profiles, state]) => {
         if (alive) {
           setRuntimeProfiles(profiles);
@@ -106,7 +110,7 @@ export function ReverseTab({ taskId, paused, onStart }: { taskId: string; paused
       alive = false;
       window.clearInterval(timer);
     };
-  }, [taskId, runtimeRefresh]);
+  }, [taskId, runtimeRefresh, api, readOnly]);
   React.useEffect(() => {
     if (paused) return;
     const timer = window.setInterval(() => {
@@ -162,15 +166,15 @@ export function ReverseTab({ taskId, paused, onStart }: { taskId: string; paused
         <Alert>
           <AlertTitle>逆向任务已暂停</AlertTitle>
           <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
-            <span>可上传或补充样本与符号材料，确认引擎就绪后继续分析。</span>
-            <Button
+            <span>{readOnly ? "可查看已有材料、分析结论与运行记录。" : "可上传或补充样本与符号材料，确认引擎就绪后继续分析。"}</span>
+            {!readOnly && <Button
               size="sm"
               onClick={onStart}
               disabled={artifacts.length === 0 || readiness?.available !== true || loading}
             >
               <RefreshCwIcon data-icon="inline-start" />
               启动分析
-            </Button>
+            </Button>}
           </AlertDescription>
         </Alert>
       )}
@@ -197,6 +201,7 @@ export function ReverseTab({ taskId, paused, onStart }: { taskId: string; paused
           <CardTitle className="text-base">运行时观察</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-3 text-sm">
+          {!readOnly && <div>
           <p className="text-muted-foreground">
             静态分析默认不会运行样本。启用后，Agent 可在所选实验环境运行所选材料，并保存调用、输出与清理记录。
           </p>
@@ -303,6 +308,7 @@ export function ReverseTab({ taskId, paused, onStart }: { taskId: string; paused
             </Button>
           </div>
           {!paused && <p className="text-muted-foreground">暂停任务后可调整材料与环境授权。</p>}
+          </div>}
           {runtimeRuns.map((run) => (
             <div key={run.id} className="flex flex-wrap items-center gap-2 rounded-md border p-2">
               <Badge variant={run.status === "failed" ? "destructive" : "secondary"}>
@@ -335,7 +341,7 @@ export function ReverseTab({ taskId, paused, onStart }: { taskId: string; paused
         </CardContent>
       </Card>
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card>
+        {!readOnly && <Card>
           <CardHeader>
             <CardTitle className="text-base">分析引擎</CardTitle>
           </CardHeader>
@@ -379,8 +385,8 @@ export function ReverseTab({ taskId, paused, onStart }: { taskId: string; paused
               <p className="text-sm text-muted-foreground">暂无引擎状态</p>
             )}
           </CardContent>
-        </Card>
-        <Card>
+        </Card>}
+        {!readOnly && <Card>
           <CardHeader>
             <CardTitle className="text-base">上传分析材料</CardTitle>
           </CardHeader>
@@ -414,7 +420,7 @@ export function ReverseTab({ taskId, paused, onStart }: { taskId: string; paused
               {uploading ? "上传中" : "上传材料"}
             </Button>
           </CardContent>
-        </Card>
+        </Card>}
       </div>
       <Card>
         <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">

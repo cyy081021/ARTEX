@@ -26,6 +26,7 @@ func (s *Server) teamExecutionRoutes(m *http.ServeMux) {
 	s.teamBranchRoutes(m)
 	s.teamMessageRoutes(m)
 	m.HandleFunc("GET /api/teams/{team}/tasks/{task}", s.teamTaskDetail)
+	m.HandleFunc("GET /api/teams/{team}/tasks/{task}/native", s.teamTaskNative)
 	m.HandleFunc("GET /api/teams/{team}/tasks/{task}/view/{section}", s.teamTaskContent)
 	m.HandleFunc("GET /api/teams/{team}/tasks/{task}/view/{section}/{item}", s.teamTaskContent)
 	m.HandleFunc("GET /api/teams/{team}/tasks/{task}/work", s.teamWork)

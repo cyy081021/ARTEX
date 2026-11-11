@@ -38,7 +38,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { api } from "@/lib/api";
+import { useTaskView } from "@/lib/task-view-context";
 import { parseCompanyScopeText } from "@/lib/company-scope";
 import { taskAssetSourceLabel } from "@/lib/task-assets";
 import type { Asset, NewAssetType } from "@/lib/types";
@@ -278,6 +278,7 @@ function AddTaskAssetsSheet({
   open: boolean;
   taskId: string;
 }) {
+  const { api } = useTaskView();
   const [scopeText, setScopeText] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const parsedScope = React.useMemo(() => parseCompanyScopeText(scopeText), [scopeText]);
@@ -340,6 +341,7 @@ function AddTaskAssetsSheet({
 }
 
 export function AssetsTab({ taskId }: { taskId: string }) {
+  const { api, readOnly } = useTaskView();
   const [rows, setRows] = React.useState<Asset[]>([]);
   const [total, setTotal] = React.useState(0);
   const [counts, setCounts] = React.useState<Record<string, number>>({});
@@ -448,7 +450,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
     }
   };
 
-  const removeButton = (asset: Asset) => (
+  const removeButton = (asset: Asset) => readOnly ? null : (
     <Button
       variant="ghost"
       size="icon-sm"
@@ -480,10 +482,10 @@ export function AssetsTab({ taskId }: { taskId: string }) {
           <h2 className="font-medium text-sm">测试资产</h2>
           <p className="text-muted-foreground text-xs">当前任务共关联 {totalAll} 项资产</p>
         </div>
-        <Button size="sm" onClick={() => setAddOpen(true)}>
+        {!readOnly && <Button size="sm" onClick={() => setAddOpen(true)}>
           <PlusIcon data-icon="inline-start" />
           新增测试资产
-        </Button>
+        </Button>}
       </div>
 
       <Tabs

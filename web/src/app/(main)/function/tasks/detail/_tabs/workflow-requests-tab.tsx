@@ -10,7 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { api } from "@/lib/api";
+import { useTaskView } from "@/lib/task-view-context";
 import type { Task, WorkflowRequest } from "@/lib/types";
 
 const STATUS: Record<string, { label: string; variant: "secondary" | "default" | "outline" | "destructive" }> = {
@@ -29,6 +29,7 @@ function taskLabel(task: Task) {
 }
 
 export function WorkflowRequestsTab({ taskId, taskKind }: { taskId: string; taskKind: "pentest" | "reverse" }) {
+  const { api, readOnly, taskHref } = useTaskView();
   const [requests, setRequests] = React.useState<WorkflowRequest[]>([]);
   const [tasks, setTasks] = React.useState<Task[]>([]);
   const [taskLoadError, setTaskLoadError] = React.useState("");
@@ -76,6 +77,7 @@ export function WorkflowRequestsTab({ taskId, taskKind }: { taskId: string; task
     setTaskLoadError("");
     setRequests([]);
     const loadTasks = async () => {
+      if (readOnly) return;
       try {
         const result = await api.tasks();
         if (alive) { setTasks(result.tasks); setTaskLoadError(""); }
@@ -97,7 +99,7 @@ export function WorkflowRequestsTab({ taskId, taskKind }: { taskId: string; task
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", poll);
     };
-  }, [refresh, taskId]);
+  }, [refresh, taskId, api, readOnly]);
 
   const candidates = tasks.filter((task) =>
     task.id !== taskId && (task.kind ?? "pentest") === (taskKind === "reverse" ? "pentest" : "reverse") &&
@@ -184,7 +186,7 @@ export function WorkflowRequestsTab({ taskId, taskKind }: { taskId: string; task
           </Button>
         </CardHeader>
         <CardContent>
-          <form className="grid gap-3" onSubmit={submit}>
+          {!readOnly && <form className="grid gap-3" onSubmit={submit}>
             <div className="grid gap-1.5">
               <Label htmlFor="workflow-question">需要解决的问题</Label>
               <Textarea id="workflow-question" rows={3} value={question} onChange={(e) => inputChanged(setQuestion)(e.target.value)} placeholder="描述一个可独立回答、可验收的问题" required disabled={submitting} />
@@ -221,7 +223,7 @@ export function WorkflowRequestsTab({ taskId, taskKind }: { taskId: string; task
                 {submitting ? "提交中…" : "发起协助"}
               </Button>
             </div>
-          </form>
+          </form>}
         </CardContent>
       </Card>
 
@@ -247,9 +249,9 @@ export function WorkflowRequestsTab({ taskId, taskKind }: { taskId: string; task
                   <span className="text-muted-foreground text-xs">请求 #{request.id} · {request.budget_seconds} 秒</span>
                   {request.parent_request_id && <span className="text-muted-foreground text-xs">上游请求 #{request.parent_request_id}</span>}
                   <div className="ml-auto flex items-center gap-2 text-xs">
-                    <Link className="text-primary hover:underline" href={`/function/tasks/detail?id=${request.source_task_id}`}>来源任务 #{request.source_task_id}</Link>
+                    <Link className="text-primary hover:underline" href={taskHref(request.source_task_id)}>来源任务 #{request.source_task_id}</Link>
                     <span aria-hidden="true">→</span>
-                    <Link className="text-primary hover:underline" href={`/function/tasks/detail?id=${request.target_task_id}`}>目标任务 #{request.target_task_id}</Link>
+                    <Link className="text-primary hover:underline" href={taskHref(request.target_task_id)}>目标任务 #{request.target_task_id}</Link>
                   </div>
                 </div>
                 <div>
@@ -275,7 +277,7 @@ export function WorkflowRequestsTab({ taskId, taskKind }: { taskId: string; task
                   <p className="mt-1 whitespace-pre-wrap text-sm">{request.result.summary}</p>
                   {request.result.limitations && <p className="text-muted-foreground mt-2 whitespace-pre-wrap text-xs">局限：{request.result.limitations}</p>}
                 </div>}
-                {outgoing && request.status === "pending" && <div className="flex justify-end">
+                {!readOnly && outgoing && request.status === "pending" && <div className="flex justify-end">
                   <Button type="button" variant="outline" size="sm" disabled={cancelling === request.id} onClick={() => void cancel(request.id)}>
                     {cancelling === request.id && <LoaderCircleIcon className="animate-spin" data-icon="inline-start" />}
                     {cancelling === request.id ? "正在取消…" : "取消请求"}

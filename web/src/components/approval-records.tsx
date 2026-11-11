@@ -25,7 +25,7 @@ import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { api } from "@/lib/api";
+import { useTaskView } from "@/lib/task-view-context";
 import type {
   InterceptApprovalFilter,
   InterceptApprovalRow,
@@ -60,6 +60,7 @@ function originLabel(row: InterceptApprovalRow) {
 }
 
 function ApprovalOrigin({ row, detail = false }: { row: InterceptApprovalRow; detail?: boolean }) {
+  const { api, readOnly, taskHref } = useTaskView();
   const [locating, setLocating] = React.useState(false);
   const label = detail && row.task_id ? `任务 ${row.task_id}` : originLabel(row);
   const query = new URLSearchParams({ approval: String(row.id) });
@@ -69,7 +70,7 @@ function ApprovalOrigin({ row, detail = false }: { row: InterceptApprovalRow; de
     href = `/chat?${query}`;
   } else if (row.task_id) {
     query.set("id", row.task_id);
-    href = `/function/tasks/detail?${query}`;
+    href = readOnly ? taskHref(row.task_id) : `/function/tasks/detail?${query}`;
   }
   return href ? (
     <a
@@ -77,7 +78,7 @@ function ApprovalOrigin({ row, detail = false }: { row: InterceptApprovalRow; de
       className="text-primary underline-offset-4 hover:underline"
       aria-label={`定位审批 #${row.id} 的来源：${label}`}
       aria-busy={locating}
-      onClick={async (e) => {
+      onClick={readOnly ? undefined : async (e) => {
         e.stopPropagation();
         if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
         e.preventDefault();
@@ -174,7 +175,7 @@ const executionLabels: Record<InterceptAudit["execution_status"], string> = {
   unknown: "执行结果未知",
 };
 
-function ModelReviewContext({ input }: { input: InterceptReviewInput }) {
+function ModelReviewContext({ input, readOnly = false }: { input: InterceptReviewInput; readOnly?: boolean }) {
   return (
     <section className="flex min-w-0 flex-col gap-4" aria-label="模型审查上下文">
       <div className="flex flex-col gap-2">
@@ -223,7 +224,7 @@ function ModelReviewContext({ input }: { input: InterceptReviewInput }) {
         </>
       )}
       {input.working_directory ? <CodeBlock label="工作目录" text={input.working_directory} /> : null}
-      {input.version >= 3 ? (
+      {!readOnly && (input.version >= 3 ? (
         <p className="text-muted-foreground text-xs">本次审查未发送历史调用或执行结果。</p>
       ) : (
         <div className="flex min-w-0 flex-col gap-3">
@@ -245,9 +246,9 @@ function ModelReviewContext({ input }: { input: InterceptReviewInput }) {
             <p className="text-muted-foreground text-xs">历史为有限窗口，部分内容已截断。</p>
           ) : null}
         </div>
-      )}
+      ))}
 
-      <Collapsible>
+      {!readOnly && <Collapsible>
         <CollapsibleTrigger asChild>
           <Button variant="outline" size="sm" className="self-start">
             <ChevronDownIcon data-icon="inline-start" />
@@ -257,7 +258,7 @@ function ModelReviewContext({ input }: { input: InterceptReviewInput }) {
         <CollapsibleContent className="pt-3">
           <CodeBlock label="模型审查输入" text={JSON.stringify(input, null, 2)} />
         </CollapsibleContent>
-      </Collapsible>
+      </Collapsible>}
     </section>
   );
 }
@@ -297,6 +298,7 @@ export function ApprovalDetail({
   defaultExpanded?: boolean;
   onResolved?: (status: "allowed" | "denied" | "timeout") => void;
 }) {
+  const { api } = useTaskView();
   const [detail, setDetail] = React.useState<InterceptDetail | null>(null);
   const [error, setError] = React.useState("");
   const [retry, setRetry] = React.useState(0);
@@ -339,7 +341,7 @@ export function ApprovalDetail({
   return (
     <div className="flex min-w-0 flex-col gap-4 p-3 sm:p-5">
       <div className="grid min-w-0 gap-5 rounded-xl border bg-muted/20 p-4 lg:grid-cols-2">
-        <div className="flex min-w-0 flex-col gap-3">
+        {!readOnly && <div className="flex min-w-0 flex-col gap-3">
           <CodeBlock
             label={`${current.agent_name || current.conv_agent_key || "Agent"} · 工具请求`}
             text={JSON.stringify(row.tool_input ?? {}, null, 2)}
@@ -360,7 +362,7 @@ export function ApprovalDetail({
           <p className="text-muted-foreground text-xs">
             执行结果：<span className="text-foreground">{detail ? execution : "加载中…"}</span>
           </p>
-        </div>
+        </div>}
         <div className="flex min-w-0 flex-col gap-4 lg:border-l lg:pl-5">
           <h3 className="font-medium text-muted-foreground text-xs">
             {current.status === "pending" ? "审查状态" : "审批裁决"}
@@ -428,7 +430,7 @@ export function ApprovalDetail({
           <CollapsibleContent className="pt-4">
             <div className="flex min-w-0 flex-col gap-5">
               {audit.model_input ? (
-                <ModelReviewContext input={audit.model_input} />
+                <ModelReviewContext input={audit.model_input} readOnly={readOnly} />
               ) : (
                 <Alert>
                   <AlertDescription>
@@ -546,6 +548,7 @@ function ApprovalTable({
   revision: number;
   label: string;
 }) {
+  const { readOnly } = useTaskView();
   const [expanded, setExpanded] = React.useState<Set<number>>(() => new Set());
   const columns = React.useSyncExternalStore(subscribeColumns, visibleColumnCount, serverColumnCount);
   const prefix = React.useId();
@@ -568,7 +571,7 @@ function ApprovalTable({
           <TableHead className="w-28">工具</TableHead>
           <TableHead className="hidden md:table-cell">来源</TableHead>
           <TableHead className="hidden lg:table-cell">匹配规则</TableHead>
-          <TableHead className="hidden xl:table-cell">参数</TableHead>
+          {!readOnly && <TableHead className="hidden xl:table-cell">参数</TableHead>}
           <TableHead className="w-24">状态</TableHead>
           <TableHead className="hidden w-36 lg:table-cell">申请时间</TableHead>
           <TableHead className="hidden w-36 xl:table-cell">决定时间</TableHead>
@@ -617,9 +620,9 @@ function ApprovalTable({
                 <TableCell className="hidden lg:table-cell">
                   <MatchCell row={row} />
                 </TableCell>
-                <TableCell className="hidden xl:table-cell">
+                {!readOnly && <TableCell className="hidden xl:table-cell">
                   <code className="block truncate text-muted-foreground text-xs">{JSON.stringify(row.tool_input)}</code>
-                </TableCell>
+                </TableCell>}
                 <TableCell>
                   <StatusBadge status={row.status} />
                 </TableCell>
@@ -634,7 +637,7 @@ function ApprovalTable({
                 <TableRow className="hover:bg-transparent has-aria-expanded:bg-transparent">
                   <TableCell colSpan={columns} className="whitespace-normal p-0">
                     <section id={panelID} aria-label={`审批详情 #${row.id}`}>
-                      <ApprovalDetail row={row} busy={busy} decide={decide} revision={revision} />
+                      <ApprovalDetail row={row} busy={busy} decide={decide} revision={revision} readOnly={readOnly} />
                     </section>
                   </TableCell>
                 </TableRow>
@@ -648,6 +651,7 @@ function ApprovalTable({
 }
 
 export function ApprovalRecords({ taskId }: { taskId?: string }) {
+  const { api, readOnly } = useTaskView();
   const [rows, setRows] = React.useState<InterceptApprovalRow[]>([]);
   const [pendingRows, setPendingRows] = React.useState<InterceptPending[]>([]);
   const [page, setPage] = React.useState(1);
@@ -682,7 +686,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
         // fill the page or a filter would hide them.
         const [history, pending] = await Promise.allSettled([
           taskId ? api.interceptTaskPage(taskId, page, pageSize, filter) : api.interceptHistoryPage(page, pageSize, filter),
-          api.interceptPending(),
+          readOnly ? Promise.resolve([] as InterceptPending[]) : api.interceptPending(),
         ]);
         if (id !== request.current) return;
         if (history.status === "fulfilled") {
@@ -708,7 +712,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
         }
       }
     },
-    [taskId, page, pageSize, filter],
+    [taskId, page, pageSize, filter, api, readOnly],
   );
   const latestLoad = React.useRef(load);
   latestLoad.current = load;
@@ -789,7 +793,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
           刷新
         </Button>
       </div>
-      <p className="text-muted-foreground text-sm">展开记录查看工具请求和审批裁决，以及当时的上下文与执行结果。</p>
+      <p className="text-muted-foreground text-sm">{readOnly ? "展开记录查看审批状态、裁决理由与时间。" : "展开记录查看工具请求和审批裁决，以及当时的上下文与执行结果。"}</p>
       <FieldGroup className="flex-row flex-wrap items-end gap-3" aria-label="审批记录筛选">
         <Field className="w-full sm:w-40">
           <FieldLabel htmlFor={`${filterID}-status`}>审批状态</FieldLabel>
