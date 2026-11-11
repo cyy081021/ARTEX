@@ -8,6 +8,7 @@ import { teamSessionStateLabel } from "@/lib/team-session-display";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ExecutionPanel } from "../execution-panel";
+import { TeamTaskContentPanel, type TeamTaskSection } from "@/components/team-task-content";
 
 type Task = { id: number; name: string; kind: string; goal: string; status: string; paused: boolean; queued: boolean; created_at: string; completed_at?: string };
 type Member = { id: number; login: string; revoked: boolean };
@@ -24,7 +25,7 @@ function TeamTaskDetail() {
   const [dataScope, setDataScope] = React.useState("");
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(true);
-  const [activeTab, setActiveTab] = React.useState<"session" | "execution" | "review" | "overview">("session");
+  const [activeTab, setActiveTab] = React.useState<"session" | TeamTaskSection | "execution" | "review">("session");
   const activeScope = `${team}:${id}`;
 
   React.useEffect(() => {
@@ -65,9 +66,12 @@ function TeamTaskDetail() {
         <div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-xl font-semibold">{task.name || `任务 ${task.id}`} <span className="text-sm font-normal text-muted-foreground">#{task.id}</span></h1><p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{task.goal || "未提供任务目标。"}</p></div><div className="flex flex-wrap gap-2"><Badge variant="outline">{task.kind === "reverse" ? "逆向" : task.kind === "pentest" ? "渗透" : task.kind}</Badge><Badge variant="secondary">{teamSessionStateLabel(task.status)}</Badge>{task.paused && task.status !== "paused" && <Badge variant="outline">已暂停</Badge>}{task.queued && <Badge variant="outline">排队中</Badge>}</div></div>
       </header>
       <nav role="tablist" aria-label="团队任务详情" className="flex flex-wrap gap-1 rounded-md border bg-muted/40 p-1">
-        {([["session", "会话"], ["execution", "协作进度 / 执行"], ["review", "复核与记录"], ["overview", "任务概览"]] as const).map(([key, label]) => <button key={key} role="tab" aria-selected={activeTab === key} className={`min-h-10 rounded px-3 text-sm ${activeTab === key ? "bg-background shadow-sm" : "text-muted-foreground"}`} onClick={() => setActiveTab(key)}>{label}</button>)}
+        {([["session", "会话"], ["overview", "总览"], ["graph", "探索链路"], ["broadcast", "播报板"], ["findings", "发现"], ["finding-relations", "漏洞关联"], ["retests", "复测"], ["assets", "测试资产"], ["coverage", "资产覆盖图"], ["intercept", "拦截审批"], ["report", "报告"], ["workflow-requests", "跨流程协助"], ...(task.kind === "reverse" ? [["reverse", "分析档案"]] : []), ["execution", "协作进度 / 执行"], ["review", "复核与记录"]] as [string, string][]).map(([key, label]) => <button key={key} role="tab" aria-selected={activeTab === key} className={`min-h-10 rounded px-3 text-sm ${activeTab === key ? "bg-background shadow-sm" : "text-muted-foreground"}`} onClick={() => setActiveTab(key as typeof activeTab)}>{label}</button>)}
       </nav>
-      {activeTab === "overview" ? <Card><CardHeader><CardTitle>任务概览</CardTitle></CardHeader><CardContent className="space-y-4"><div><h2 className="text-sm font-medium">任务目标</h2><p className="mt-1 whitespace-pre-wrap break-words text-sm">{task.goal || "未提供任务目标。"}</p></div><div><h2 className="text-sm font-medium">当前权限</h2><p className="mt-1 text-sm">{[["查看", currentDetail.permissions.read], ["执行", currentDetail.permissions.execute], ["管理", currentDetail.permissions.manage], ["复核", currentDetail.permissions.review]].map(([name, allowed]) => `${name}：${allowed ? "允许" : "未授权"}`).join(" · ")}</p></div><p className="text-xs text-muted-foreground">创建：{task.created_at ? new Date(task.created_at).toLocaleString() : "未知"}{task.completed_at ? ` · 完成：${new Date(task.completed_at).toLocaleString()}` : ""}</p></CardContent></Card> : <ExecutionPanel key={`${team}:${id}`} team={team} tasks={[{ id: task.id, name: task.name, kind: task.kind }]} members={members} memberID={currentDetail.member_id} admin={currentDetail.is_admin} initialTaskID={id} lockTaskSelection viewMode={activeTab === "session" ? "session" : activeTab === "execution" ? "execution" : "review"} />}
+      {activeTab === "session" || activeTab === "execution" || activeTab === "review" ? <ExecutionPanel key={`${team}:${id}`} team={team} tasks={[{ id: task.id, name: task.name, kind: task.kind }]} members={members} memberID={currentDetail.member_id} admin={currentDetail.is_admin} initialTaskID={id} lockTaskSelection viewMode={activeTab === "session" ? "session" : activeTab === "execution" ? "execution" : "review"} /> : <div className="space-y-4">
+        {activeTab === "overview" && <Card><CardHeader><CardTitle>当前查看权限</CardTitle></CardHeader><CardContent className="space-y-2"><p className="text-sm">查看：{currentDetail.permissions.read ? "允许" : "未授权"} · 执行：{currentDetail.permissions.execute ? "允许" : "未授权"} · 管理：{currentDetail.permissions.manage ? "允许" : "未授权"} · 复核：{currentDetail.permissions.review ? "允许" : "未授权"}</p><p className="text-xs text-muted-foreground">创建：{task.created_at ? new Date(task.created_at).toLocaleString() : "未知"}{task.completed_at ? ` · 完成：${new Date(task.completed_at).toLocaleString()}` : ""}</p></CardContent></Card>}
+        <TeamTaskContentPanel key={`${team}:${id}:${activeTab}`} team={team} task={id} section={activeTab} />
+      </div>}
     </>}
   </main>;
 }
