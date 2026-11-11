@@ -28,6 +28,7 @@ web/next-env.d.ts
 /docs/*
 !/docs/team-onboarding.md
 !/docs/team-onboarding-validation.md
+!/docs/team-member-detail-validation.md
 
 # os
 .DS_Store
