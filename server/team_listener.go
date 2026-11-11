@@ -33,7 +33,7 @@ func (s *Server) teamOnly(next http.Handler) http.Handler {
 			}
 		} else {
 			allowed := r.Method == "GET" || r.Method == "HEAD"
-			allowed = allowed && (p == "/team-login" || p == "/team-login/" || p == "/function/team" || p == "/function/team/" || strings.HasPrefix(p, "/_next/") || p == "/favicon.ico" || p == "/logo.png" || p == "/logo.svg")
+			allowed = allowed && (p == "/team-login" || p == "/team-login/" || p == "/function/team" || p == "/function/team/" || p == "/function/team/task" || p == "/function/team/task/" || strings.HasPrefix(p, "/_next/") || p == "/favicon.ico" || p == "/logo.png" || p == "/logo.svg")
 			if !allowed {
 				http.NotFound(w, r)
 				return

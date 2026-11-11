@@ -205,14 +205,18 @@ export function ExecutionPanel({
   members,
   memberID,
   admin,
+  initialTaskID,
+  lockTaskSelection = false,
 }: {
   team: string;
   tasks: { id: number; name: string; kind: string }[];
   members: { id: number; login: string }[];
   memberID: number;
   admin: boolean;
+  initialTaskID?: string;
+  lockTaskSelection?: boolean;
 }) {
-  const [taskID, setTaskID] = React.useState("");
+  const [taskID, setTaskID] = React.useState(initialTaskID ?? "");
   const [branchMode, setBranchMode] = React.useState(false);
   const [work, setWork] = React.useState<Work | null>(null);
   const [assignments, setAssignments] = React.useState<Assignment[]>([]);
@@ -477,7 +481,7 @@ export function ExecutionPanel({
         </p>
       </CardHeader>
       <CardContent className="space-y-5">
-        <div className="max-w-xl space-y-2">
+        {!lockTaskSelection && <div className="max-w-xl space-y-2">
           <Label htmlFor="execution-task">共享任务</Label>
           <select
             id="execution-task"
@@ -502,7 +506,7 @@ export function ExecutionPanel({
               </option>
             ))}
           </select>
-        </div>
+        </div>}
         {taskID && !branchMode && <TeamSessionWorkspace team={team} taskId={taskID} />}
         {taskID && <TeamBranches key={historyScope} team={team} taskId={Number(taskID)} memberID={memberID} admin={admin} members={members} devices={work?.devices} materials={work?.materials} canManage={admin || !!work?.permissions.manage} onModeChange={setBranchMode} />}
         {error && (

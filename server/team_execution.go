@@ -25,6 +25,7 @@ import (
 func (s *Server) teamExecutionRoutes(m *http.ServeMux) {
 	s.teamBranchRoutes(m)
 	s.teamMessageRoutes(m)
+	m.HandleFunc("GET /api/teams/{team}/tasks/{task}", s.teamTaskDetail)
 	m.HandleFunc("GET /api/teams/{team}/tasks/{task}/work", s.teamWork)
 	m.HandleFunc("POST /api/teams/{team}/tasks/{task}/dispatch", s.teamQueue)
 	m.HandleFunc("POST /api/teams/{team}/tasks/{task}/dispatch/{dispatch}/cancel", s.teamCancelQueue)
@@ -52,6 +53,7 @@ func teamExecutionError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) teamTaskScope(w http.ResponseWriter, r *http.Request, permission string) (teamIdentity, int64, *db.Task, bool) {
+	w.Header().Set("Cache-Control", "no-store")
 	p, team, ok := s.teamScope(w, r, false)
 	if !ok {
 		return p, team, nil, false

@@ -36,7 +36,8 @@ export default function TeamPage() {
     http<{ teams: Team[]; is_admin: boolean }>("/teams").then((r) => {
       if (!alive) return;
       setTeams(r.teams); setAdmin(r.is_admin);
-      setSelected((id) => r.teams.some((t) => String(t.id) === id) ? id : String(r.teams[0]?.id ?? ""));
+      const requested = new URLSearchParams(window.location.search).get("team") ?? "";
+      setSelected((id) => r.teams.some((t) => String(t.id) === id) ? id : r.teams.some((t) => String(t.id) === requested) ? requested : String(r.teams[0]?.id ?? ""));
     }).catch((e) => { if (alive) setError(e.message); }).finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [revision]);
@@ -70,13 +71,13 @@ export default function TeamPage() {
     <div className="flex flex-wrap items-center gap-3"><Label htmlFor="team-choice">当前团队</Label><select id="team-choice" value={selected} disabled={loading || busy} onChange={(e) => { setError(""); setSelected(e.target.value); }} className="min-h-10 min-w-48 rounded-md border bg-background px-3 text-sm"><option value="">{loading ? "加载中…" : "请选择团队"}</option>{teams.map((t) => <option key={t.id} value={t.id}>{t.name} · #{t.id}</option>)}</select><Link href="/team-login" className="text-sm underline">成员登录入口</Link></div>
     {admin && <Card><CardHeader><CardTitle>创建团队</CardTitle></CardHeader><CardContent><form className="flex flex-wrap items-end gap-3" onSubmit={(e) => { const f = fields(e); void act(() => send("/teams", { name: f.get("name") }), "团队已创建"); }}><div className="space-y-2"><Label htmlFor="team-name">团队名称</Label><Input id="team-name" name="name" required maxLength={200} disabled={busy} /></div><Button disabled={busy}>创建</Button></form></CardContent></Card>}
     {!loading && teams.length === 0 && <p className="text-sm text-muted-foreground">还没有可访问的团队。</p>}
-    {workspace && <>
+      {workspace && <>
       <TeamConnectionGuide team={selected} admin={admin} />
       {admin && <TeamLifecycle key={`${selected}:${revision}`} team={selected} name={teams.find((t) => String(t.id) === selected)?.name ?? ""} onDeleted={() => { setNotice(`团队 #${selected} 已删除`); setSelected(""); refresh(); }} />}
       <ExecutionPanel key={selected} team={selected} tasks={workspace.tasks} members={members} memberID={workspace.member_id} admin={workspace.is_admin} />
       <Card><CardHeader><CardTitle>共享任务</CardTitle></CardHeader><CardContent className="space-y-3">
         {!workspace.remote_execution_available && <p className="text-sm text-muted-foreground">设备远程派工尚未开放。配对设备后不会自动启动或迁移任务。</p>}
-        {workspace.tasks.length === 0 ? <p className="text-sm text-muted-foreground">还没有授权给你的共享任务。</p> : workspace.tasks.map((task) => <div key={task.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3"><span>{workspace.is_admin ? <Link className="underline" href={`/function/tasks/detail/?id=${task.id}`}>{task.name || `任务 ${task.id}`}</Link> : task.name || `任务 ${task.id}`}</span><div className="flex gap-2"><Badge variant="outline">{task.kind === "reverse" ? "逆向" : "渗透"}</Badge><Badge variant="secondary">{task.status}</Badge></div></div>)}
+        {workspace.tasks.length === 0 ? <p className="text-sm text-muted-foreground">还没有授权给你的共享任务。</p> : workspace.tasks.map((task) => <div key={task.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3"><div className="flex flex-wrap items-center gap-2"><Link className="min-h-11 inline-flex items-center underline" href={`/function/team/task/?team=${encodeURIComponent(selected)}&id=${task.id}`}>{task.name || `任务 ${task.id}`}</Link><span className="text-xs text-muted-foreground">任务 #{task.id}</span>{workspace.is_admin && <Link className="min-h-11 inline-flex items-center text-xs underline" href={`/function/tasks/detail/?id=${task.id}`}>管理详情</Link>}</div><div className="flex gap-2"><Badge variant="outline">{task.kind === "reverse" ? "逆向" : "渗透"}</Badge><Badge variant="secondary">{task.status}</Badge></div></div>)}
       </CardContent></Card>
       {admin && <Card><CardHeader><CardTitle>成员与任务授权</CardTitle></CardHeader><CardContent className="space-y-5">
         <form className="flex flex-wrap items-end gap-3" onSubmit={(e) => { const f = fields(e); const form = e.currentTarget; void act(async () => { await send(`/teams/${selected}/members`, { login: f.get("login"), password: f.get("password") }); form.reset(); }, "成员已创建"); }}><div className="space-y-2"><Label htmlFor="member-login">成员账号</Label><Input id="member-login" name="login" required maxLength={160} disabled={busy} autoComplete="off" /></div><div className="space-y-2"><Label htmlFor="member-password">初始密码</Label><Input id="member-password" name="password" type="password" required minLength={8} disabled={busy} autoComplete="new-password" /></div><Button disabled={busy}>添加成员</Button></form>

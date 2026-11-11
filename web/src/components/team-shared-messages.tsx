@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { reconcileTeamSession, teamSessionStateLabel, teamSessionWorkerLabel, visibleTeamSessions, type TeamSessionFilter } from "@/lib/team-session-display";
 import type { TeamSession, TeamSessionMessage } from "@/lib/types";
 
 const PAGE_SIZE = 100;
@@ -43,6 +44,9 @@ export function TeamSessionWorkspace({ team, taskId }: { team: string; taskId: s
   const [sessions, setSessions] = React.useState<TeamSession[]>([]);
   const [canSteer, setCanSteer] = React.useState(false);
   const [sessionID, setSessionID] = React.useState("");
+  const [filter, setFilter] = React.useState<TeamSessionFilter>("all");
+  const filterRef = React.useRef<TeamSessionFilter>("all");
+  const sessionIDRef = React.useRef("");
   const [error, setError] = React.useState("");
   const scopeRef = React.useRef(0);
 
@@ -54,20 +58,29 @@ export function TeamSessionWorkspace({ team, taskId }: { team: string; taskId: s
       try {
         const result = await api.teamSessions(team, taskId);
         if (!alive || scope !== scopeRef.current) return;
-        setSessions(result.sessions);
+        setSessions(result.sessions ?? []);
         setCanSteer(result.canSteer);
-        setSessionID((current) =>
-          result.sessions.some((session) => session.id === current) ? current : (result.sessions[0]?.id ?? ""),
-        );
+        const nextID = reconcileTeamSession(sessionIDRef.current, result.sessions ?? [], result.canSteer, filterRef.current);
+        sessionIDRef.current = nextID;
+        setSessionID(nextID);
         setError("");
       } catch (e) {
-        if (alive && scope === scopeRef.current) setError((e as Error).message);
+        if (alive && scope === scopeRef.current) {
+          setError((e as Error).message);
+          setCanSteer(false);
+          const status = (e as { status?: number }).status;
+          if (status === 401 || status === 403 || status === 404) { setSessions([]); sessionIDRef.current = ""; setSessionID(""); }
+        }
       } finally {
         if (alive && scope === scopeRef.current) timer = setTimeout(load, 5000);
       }
     };
     setSessions([]);
+    setCanSteer(false);
+    sessionIDRef.current = "";
     setSessionID("");
+    filterRef.current = "all";
+    setFilter("all");
     void load();
     return () => {
       alive = false;
@@ -75,26 +88,43 @@ export function TeamSessionWorkspace({ team, taskId }: { team: string; taskId: s
     };
   }, [team, taskId]);
 
+  const filteredSessions = visibleTeamSessions(sessions, canSteer, filter);
   const session = sessions.find((item) => item.id === sessionID);
+  const currentIsFiltered = !!session && !filteredSessions.some((item) => item.id === session.id);
+  const chooseFilter = (value: TeamSessionFilter) => {
+    filterRef.current = value;
+    setFilter(value);
+    if (!session || !visibleTeamSessions(sessions, canSteer, value).some((item) => item.id === session.id)) {
+      const nextID = reconcileTeamSession("", sessions, canSteer, value);
+      sessionIDRef.current = nextID;
+      setSessionID(nextID);
+    }
+  };
   return (
     <section className="space-y-3 rounded-md border p-3" aria-label="共享会话消息">
       <div className="flex flex-wrap items-center gap-2">
         <h3 className="text-sm font-medium">共享会话</h3>
-        {!canSteer && <Badge variant="outline">只读</Badge>}
+        {!canSteer && <p className="w-full text-xs text-muted-foreground">{error ? "会话状态未能更新，暂时停用发送；连接恢复后会重新核对权限。" : "发送引导需要此任务的执行权限；当前账号可查看共享消息。"}</p>}
+        <div className="flex gap-1" role="group" aria-label="筛选共享会话">
+          <Button type="button" size="sm" variant={filter === "all" ? "secondary" : "ghost"} aria-pressed={filter === "all"} className="min-h-11" onClick={() => chooseFilter("all")}>全部</Button>
+          <Button type="button" size="sm" variant={filter === "sendable" ? "secondary" : "ghost"} aria-pressed={filter === "sendable"} className="min-h-11" onClick={() => chooseFilter("sendable")}>可发送</Button>
+          <Button type="button" size="sm" variant={filter === "readonly" ? "secondary" : "ghost"} aria-pressed={filter === "readonly"} className="min-h-11" onClick={() => chooseFilter("readonly")}>只读</Button>
+        </div>
         <label className="sr-only" htmlFor="team-session-select">
           选择共享会话
         </label>
         <select
           id="team-session-select"
-          className="ml-auto min-h-8 max-w-full rounded-md border bg-background px-2 text-sm"
+          className="ml-auto min-h-11 max-w-full rounded-md border bg-background px-2 text-sm"
           value={sessionID}
-          onChange={(event) => setSessionID(event.target.value)}
-          disabled={!sessions.length}
+          onChange={(event) => { sessionIDRef.current = event.target.value; setSessionID(event.target.value); }}
+          disabled={!filteredSessions.length && !currentIsFiltered}
         >
-          {!sessions.length && <option value="">暂无共享会话</option>}
-          {sessions.map((item) => (
+          {!filteredSessions.length && <option value="">暂无符合条件的共享会话</option>}
+          {currentIsFiltered && session && <option value={session.id}>当前会话（已不符合筛选） · {teamSessionWorkerLabel(session.id)}</option>}
+          {filteredSessions.map((item) => (
             <option key={item.id} value={item.id}>
-              {item.title || item.id}
+              {teamSessionWorkerLabel(item.id)} · {item.title || item.id} · {teamSessionStateLabel(item.state)} · {canSteer && item.can_message ? "可发送" : "只读"}
             </option>
           ))}
         </select>
@@ -297,12 +327,12 @@ export function TeamSessionMessages({
   }
 
   const canSend = canSteer && session.can_message;
-  const reason = !canSteer ? "当前账号只有查看权限，不能发送引导。" : (session.reason ?? "此会话当前不可发送引导。");
+  const reason = !canSteer ? "当前账号没有任务执行权限，因此共享会话均为只读。" : (session.reason ?? "此会话当前不可发送引导。");
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-        <span>{session.executor_id === 0 ? "执行端：本机" : `执行端：设备 #${session.executor_id}`}</span>
-        <span>{session.state}</span>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+        <span>{teamSessionWorkerLabel(session.id)} · 执行端：{session.executor_id === 0 ? "本机" : `${session.executor_name || "设备"} #${session.executor_id}`}</span>
+        <span>{teamSessionStateLabel(session.state)} · {canSend ? "可发送引导" : "只读"}</span>
       </div>
       {hasMore && (
         <Button type="button" variant="ghost" size="sm" disabled={loadingOlder} onClick={() => void loadOlder()}>

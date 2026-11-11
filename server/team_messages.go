@@ -39,10 +39,17 @@ func (s *Server) sharedSessions(ctx context.Context, t *db.Task, team int64, ste
 		return nil, err
 	}
 	items := []teamSession{}
+	live, hasLive := s.chatLive.Load(strconv.FormatInt(t.ID, 10))
 	for _, v := range main {
-		items = append(items, teamSession{ID: fmt.Sprintf("main:%d", v.Seq), Title: fmt.Sprintf("主 Agent · 会话 #%d", v.Seq+1), ExecutorName: "本机", State: t.Status})
+		state := "idle"
+		if hasLive && live.(chatLiveRun).seg == v.Seq {
+			state = "running"
+		}
+		items = append(items, teamSession{ID: fmt.Sprintf("main:%d", v.Seq), Title: fmt.Sprintf("主 Agent · 会话 #%d", v.Seq+1), ExecutorName: "本机", TeamID: team, State: state,
+			Reason: "主 Agent 的共享会话仅供查看；请在主端的任务详情页打开主 Agent 会话发送消息"})
 	}
-	items = append(items, teamSession{ID: "plan", Title: "规划 Planner", ExecutorName: "本机", State: t.Status})
+	items = append(items, teamSession{ID: "plan", Title: "规划 Planner", ExecutorName: "本机", TeamID: team, State: "readonly",
+		Reason: "Planner 是自动规划记录，不直接接收对话；请通过主 Agent 调整任务目标，或向运行中的 Worker 发送引导"})
 	// Latest assignment identifies historical executor too, until this intent is
 	// actually reclaimed locally. Pagination of messages is independent of tools.
 	rows, err := s.m.pg.QueryContext(ctx, `SELECT n.id,COALESCE(n.payload->>'title',n.payload->>'summary',n.payload->>'text',n.payload->>'task',n.payload->>'description','Work'),n.state,
@@ -66,13 +73,14 @@ func (s *Server) sharedSessions(ctx context.Context, t *db.Task, team int64, ste
 		s.engine.workMu.Lock()
 		run := s.engine.work[iid]
 		local := run != nil && run.control != nil
+		stopping := local && run.control.IsStopping()
 		s.engine.workMu.Unlock()
 		if local {
 			v.ExecutorID = 0
 			v.ExecutorName = "本机"
 			v.AssignmentID = 0
 			v.Epoch = 0
-			ready = true
+			ready = !stopping
 		}
 		if v.ExecutorID == 0 {
 			v.ExecutorName = "本机"
@@ -80,17 +88,27 @@ func (s *Server) sharedSessions(ctx context.Context, t *db.Task, team int64, ste
 				v.TeamID = team
 			}
 		}
-		v.CanMessage = steer && ready && !t.Paused && (!t.Queued || (v.ExecutorID > 0 && t.QueueMode == db.RemoteWaitQueueMode)) && t.Status != "finalizing" && !isTerminalStatus(t.Status)
+		v.CanMessage = steer && ready && v.State == "running" && !t.Paused && (!t.Queued || (v.ExecutorID > 0 && t.QueueMode == db.RemoteWaitQueueMode)) && t.Status != "finalizing" && !isTerminalStatus(t.Status)
 		if !v.CanMessage {
 			switch {
 			case !steer:
 				v.Reason = "需要此任务的执行权限"
-			case t.Paused || t.Queued:
-				v.Reason = "任务已暂停或正在排队"
+			case t.Paused:
+				v.Reason = "任务已暂停；恢复任务且 Worker 开始执行后可发送引导"
+			case isTerminalStatus(t.Status) || t.Status == "finalizing":
+				v.Reason = "任务已结束或正在收尾，当前只能查看消息"
+			case t.Queued && !(v.ExecutorID > 0 && t.QueueMode == db.RemoteWaitQueueMode):
+				v.Reason = "任务正在排队，尚不能接收引导"
+			case v.State == "open" || v.State == "pending" || v.State == "blocked":
+				v.Reason = "此 Worker 尚未开始执行；请选择标记为“可发送”的会话"
+			case v.State != "running":
+				v.Reason = "此 Worker 本轮已结束或已暂停，当前只能查看消息"
+			case stopping:
+				v.Reason = "此 Worker 正在停止，当前不能接收新引导"
 			case v.ExecutorID > 0:
-				v.Reason = "执行端未开放消息通道，或本轮已结束"
+				v.Reason = "执行设备未开放消息通道、租约已失效或本轮已结束"
 			default:
-				v.Reason = "本机 Work 当前未运行"
+				v.Reason = "此本机 Worker 的消息通道尚未就绪或本轮已结束，请刷新后检查"
 			}
 		}
 		items = append(items, v)
