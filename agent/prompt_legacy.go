@@ -13,6 +13,10 @@ func LegacyBuiltinPromptHashes(key string) []string {
 		},
 		"planner": {
 			"14e163f4a44da9fee20a214048a607adc3659b2025275569eb512532ca8c15d5", // 5c0dbd4
+			"790fc1c53d48a64dc4c17d874b7df71081d8be78cecb2c95a8a2fc1f98cf2f65", // 7e88d4e
+		},
+		"reporter": {
+			"8ba98208f6c5f2ccb103c88ef13239c4264733400c0e3dfec96d3a3572d78d39", // artex-baseline
 		},
 	}[key]
 }

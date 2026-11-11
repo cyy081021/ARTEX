@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"mime/multipart"
 	"net/http/httptest"
@@ -28,15 +29,18 @@ func TestReverseRealEngineAcceptance(t *testing.T) {
 	var spec struct {
 		Workspace string `json:"workspace"`
 		Cases     []struct {
-			Name       string         `json:"name"`
-			Artifact   string         `json:"artifact"`
-			Profile    string         `json:"profile"`
-			Script     string         `json:"script"`
-			Package    string         `json:"package"`
-			Duration   int            `json:"duration"`
-			StaticTool string         `json:"static_tool"`
-			StaticArgs map[string]any `json:"static_args"`
-			Expected   string         `json:"expected"`
+			Name       string           `json:"name"`
+			Artifact   string           `json:"artifact"`
+			Profile    string           `json:"profile"`
+			Script     string           `json:"script"`
+			Package    string           `json:"package"`
+			Duration   int              `json:"duration"`
+			StaticTool string           `json:"static_tool"`
+			StaticArgs map[string]any   `json:"static_args"`
+			Expected   string           `json:"expected"`
+			Session    bool             `json:"session"`
+			BrowserURL string           `json:"browser_url"`
+			Actions    []map[string]any `json:"actions"`
 		} `json:"cases"`
 	}
 	raw, err := os.ReadFile(path)
@@ -136,8 +140,21 @@ func TestReverseRealEngineAcceptance(t *testing.T) {
 			}
 			resultPath := ""
 			if c.Profile != "" {
-				tool := workflowTool(t, roleTools, "reverse_observe_runtime")
+				toolName := "reverse_observe_runtime"
+				if c.Session {
+					toolName = "reverse_runtime_session"
+				}
+				if c.BrowserURL != "" {
+					toolName = "reverse_browser_scenario"
+				}
+				tool := workflowTool(t, roleTools, toolName)
 				args := map[string]any{"artifact_id": artifact.ID, "profile_id": c.Profile, "script": c.Script, "package_name": c.Package, "duration_ms": c.Duration}
+				if c.Session {
+					args["action"] = "start"
+				}
+				if c.BrowserURL != "" {
+					args = map[string]any{"artifact_id": artifact.ID, "profile_id": c.Profile, "start_url": c.BrowserURL, "duration_ms": c.Duration, "actions": c.Actions, "capture": map[string]any{"after_each_step": []string{"url"}, "at_end": []string{"dom", "screenshot"}, "events": []string{"network", "console", "page-errors"}, "network": map[string]any{"request_body": true, "response_body": true}}}
+				}
 				workflowCall(t, runCtx, tool, args, true) // Explicit default-deny proof.
 				policy, _ := json.Marshal(db.ReverseRuntimePolicy{Enabled: true, ProfileIDs: []string{c.Profile}, ArtifactIDs: []int64{artifact.ID}, MaxDurationMS: c.Duration})
 				saved := request("PUT", "/api/tasks/"+dto.ID+"/reverse/runtime", policy, "application/json")
@@ -145,6 +162,47 @@ func TestReverseRealEngineAcceptance(t *testing.T) {
 					t.Fatalf("policy: %d %s", saved.Code, saved.Body)
 				}
 				answer := workflowCall(t, runCtx, tool, args, false)
+				if c.Session {
+					var started struct {
+						Session string `json:"session_id"`
+						Path    string `json:"result_path"`
+					}
+					if err = json.Unmarshal([]byte(answer), &started); err != nil || started.Session == "" {
+						t.Fatalf("session start: %s %v", answer, err)
+					}
+					lastPath := started.Path
+					for _, action := range c.Actions {
+						if target, ok := action["target"].(string); ok {
+							data, err := os.ReadFile(filepath.Join(m.dir, lastPath))
+							if err != nil {
+								t.Fatal(err)
+							}
+							var frame struct {
+								Content struct {
+									Observation struct {
+										XML string `json:"ui_xml"`
+									} `json:"normalized_result"`
+								} `json:"structuredContent"`
+							}
+							if err = json.Unmarshal(data, &frame); err != nil {
+								t.Fatal(err)
+							}
+							x, y := reverseAcceptanceUIBounds(t, frame.Content.Observation.XML, target)
+							delete(action, "target")
+							action["x"], action["y"] = x, y
+						}
+						action["session_id"] = started.Session
+						answer = workflowCall(t, runCtx, tool, action, false)
+						var step struct {
+							Path string `json:"result_path"`
+						}
+						if err = json.Unmarshal([]byte(answer), &step); err != nil {
+							t.Fatal(err)
+						}
+						lastPath = step.Path
+					}
+					answer = workflowCall(t, runCtx, tool, map[string]any{"action": "stop", "session_id": started.Session}, false)
+				}
 				var result struct {
 					Status string `json:"status"`
 					Path   string `json:"result_path"`
@@ -193,6 +251,9 @@ func TestReverseRealEngineAcceptance(t *testing.T) {
 			if c.Expected == "" || !strings.Contains(string(evidence), c.Expected) {
 				t.Fatalf("actual evidence lacks %q", c.Expected)
 			}
+			if c.BrowserURL != "" && (!strings.Contains(string(evidence), "transaction_id") || !strings.Contains(string(evidence), "fixture echo result")) {
+				t.Fatal("browser evidence lacks network transaction or actual console output")
+			}
 			analysisTools := roleTools
 			answer := workflowCall(t, runCtx, workflowTool(t, analysisTools, "reverse_submit_conclusion"), map[string]any{"question": "What did the controlled fixture demonstrate?", "answer": c.Expected, "evidence": []db.ReverseEvidence{{ArtifactID: artifact.ID, Locator: c.Name, Observation: "Verified in the saved raw engine result: " + c.Expected, ResultPath: resultPath}}, "limitations": "Only this synthetic sample, engine configuration and observation window; no general program-completeness claim."}, false)
 			var submitted struct{ Conclusion db.ReverseConclusion }
@@ -217,4 +278,36 @@ func TestReverseRealEngineAcceptance(t *testing.T) {
 	if err = os.WriteFile(filepath.Join(spec.Workspace, "acceptance-summary.json"), summary, 0600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func reverseAcceptanceUIBounds(t *testing.T, raw, target string) (int, int) {
+	t.Helper()
+	decoder := xml.NewDecoder(strings.NewReader(raw))
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		node, ok := token.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		found, bounds := false, ""
+		for _, a := range node.Attr {
+			if a.Name.Local == "content-desc" && a.Value == target {
+				found = true
+			}
+			if a.Name.Local == "bounds" {
+				bounds = a.Value
+			}
+		}
+		if found {
+			var x1, y1, x2, y2 int
+			if _, err = fmt.Sscanf(bounds, "[%d,%d][%d,%d]", &x1, &y1, &x2, &y2); err == nil {
+				return (x1 + x2) / 2, (y1 + y2) / 2
+			}
+		}
+	}
+	t.Fatalf("UI target %q missing from owned sample", target)
+	return 0, 0
 }

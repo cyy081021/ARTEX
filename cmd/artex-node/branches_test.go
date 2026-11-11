@@ -34,6 +34,7 @@ func (p *branchCountingProvider) Complete(context.Context, llm.CompletionRequest
 type branchPlannerScript struct {
 	calls        atomic.Int32
 	guidanceSeen atomic.Bool
+	protocolSeen atomic.Bool
 }
 
 func (p *branchPlannerScript) Stream(_ context.Context, r llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
@@ -42,6 +43,9 @@ func (p *branchPlannerScript) Stream(_ context.Context, r llm.CompletionRequest)
 		raw, _ := json.Marshal(r)
 		if strings.Contains(string(raw), "guidance-fixture") {
 			p.guidanceSeen.Store(true)
+		}
+		if strings.Contains(string(raw), "当前节点执行协议") && strings.Contains(string(raw), "propose_work") {
+			p.protocolSeen.Store(true)
 		}
 		if n <= 2 {
 			input := fmt.Sprintf(`{"unit":{"key":"unit-%d","question":"Inspect independent fixture %d","role":"worker","asset_ids":[],"material_hashes":[],"capabilities":[],"contract":{"budget_seconds":30,"acceptance":["fixture checked"]}}}`, n, n)
@@ -290,6 +294,9 @@ func TestBranchPlannerProposesTwoUnitsAndAppliesGuidance(t *testing.T) {
 	}
 	if !provider.guidanceSeen.Load() {
 		t.Fatal("planner prompt did not include guidance snapshot")
+	}
+	if !provider.protocolSeen.Load() {
+		t.Fatal("actual planner request did not include the node protocol adapter")
 	}
 	if starts.Load() != 3 || ends.Load() != 3 {
 		t.Fatalf("authorized operation starts/ends=%d/%d, want 3/3", starts.Load(), ends.Load())

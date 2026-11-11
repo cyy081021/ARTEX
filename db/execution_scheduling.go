@@ -245,8 +245,8 @@ func (s *ExplorationStore) FindingRelations() ([]FindingRelation, error) {
 	return edges, err
 }
 
-// Automatic planner retries are explicit and bounded. Human rerun controls keep
-// their existing behavior. A new premise should become a new versioned work item.
+// Automatic continuations use saved progress; repeated no-progress failures
+// stop. Human rerun controls and dependency/resource admission stay unchanged.
 func (s *ExplorationStore) RetryWorkIntent(ctx context.Context, id int64, reason string) error {
 	if strings.TrimSpace(reason) == "" {
 		return fmt.Errorf("请说明续做依据、故障变化及接续点")
@@ -259,13 +259,27 @@ func (s *ExplorationStore) RetryWorkIntent(ctx context.Context, id int64, reason
 	if err = s.lockExploration(ctx, tx); err != nil {
 		return err
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE exploration_nodes SET state='open',owner=NULL,blocked_reason=NULL,completed_at=NULL,payload=payload||jsonb_build_object('planner_retries',1,'retry_reason',$3::text) WHERE exploration_id=$1 AND id=$2 AND kind='intent' AND state IN ('blocked','exhausted') AND COALESCE((payload->>'planner_retries')::int,0)=0`, s.expID, id, reason)
+	n, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeCols+` FROM exploration_nodes WHERE exploration_id=$1 AND id=$2 AND kind='intent' FOR UPDATE`, s.expID, id))
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return fmt.Errorf("仅可续做本任务 blocked/exhausted 工作一次；请等待新证据或人工处理")
+	if n.State != "blocked" && n.State != "exhausted" {
+		return fmt.Errorf("仅可续做本任务 blocked/exhausted 工作")
+	}
+	var state workRetryState
+	if err := json.Unmarshal(n.Payload, &state); err != nil {
+		return err
+	}
+	if state.Retries >= MaxAutomaticWorkRetries {
+		return fmt.Errorf("本工作已自动续做 %d 次；请保留检查点并由人工调整预算或工作范围", MaxAutomaticWorkRetries)
+	}
+	progress := workRetryProgress(state.Result)
+	if state.Retries > 0 && (progress == "" || progress == state.Progress) {
+		return fmt.Errorf("上次续做后没有新的已保存证据或检查点；请等待执行条件变化，不重复派发相同工作")
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE exploration_nodes SET state='open',owner=NULL,blocked_reason=NULL,completed_at=NULL,payload=payload||jsonb_build_object('planner_retries',$3::int,'retry_reason',$4::text,'planner_retry_progress',$5::text) WHERE exploration_id=$1 AND id=$2`, s.expID, id, state.Retries+1, strings.TrimSpace(reason), progress)
+	if err != nil {
+		return err
 	}
 	return tx.Commit()
 }

@@ -203,7 +203,7 @@ export function ReverseTab({ taskId, paused, onStart }: { taskId: string; paused
         <CardContent className="grid gap-3 text-sm">
           {!readOnly && <div>
           <p className="text-muted-foreground">
-            静态分析默认不会运行样本。启用后，Agent 可在所选实验环境运行所选材料，并保存调用、输出与清理记录。
+            启用后，Agent 可在所选环境运行材料，连续操作 Android 应用或浏览器页面，保存每步画面、调用和网络证据，并在结束时清理会话。
           </p>
           <label className="flex min-h-10 items-center gap-2">
             <input
@@ -217,7 +217,7 @@ export function ReverseTab({ taskId, paused, onStart }: { taskId: string; paused
           {runtimeLoading && <p className="text-muted-foreground">正在检查调试环境…</p>}
           {!runtimeLoading && runtimeLoaded && runtimeProfiles.length === 0 && (
             <p className="text-muted-foreground">
-              尚未配置调试环境。请先安装运行器并配置 Linux、Windows 或 Android 实验环境。
+              尚未配置运行环境。可配置 Linux、Windows、Android 调试环境或浏览器环境。
             </p>
           )}
           <div className="grid gap-2 sm:grid-cols-2">
@@ -273,19 +273,19 @@ export function ReverseTab({ taskId, paused, onStart }: { taskId: string; paused
             </fieldset>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <Label htmlFor="reverse-runtime-duration">每次观察上限（秒）</Label>
+            <Label htmlFor="reverse-runtime-duration">每段会话上限（秒）</Label>
             <Input
               id="reverse-runtime-duration"
               type="number"
               min={1}
-              max={60}
+              max={900}
               className="w-24"
               value={runtimePolicy.max_duration_ms / 1000}
               disabled={!paused || runtimeSaving || runtimeLoading || !runtimeLoaded}
               onChange={(e) =>
                 setRuntimePolicy((p) => ({
                   ...p,
-                  max_duration_ms: Math.max(100, Math.min(60000, Number(e.target.value) * 1000)),
+                  max_duration_ms: Math.max(100, Math.min(900000, Number(e.target.value) * 1000)),
                 }))
               }
             />

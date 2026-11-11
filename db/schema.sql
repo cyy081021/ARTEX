@@ -1701,3 +1701,8 @@ CREATE TABLE IF NOT EXISTS team_dispatch_queue (
 );
 ALTER TABLE team_dispatch_queue ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ NOT NULL DEFAULT 'epoch';
 CREATE UNIQUE INDEX IF NOT EXISTS uq_team_queued_intent ON team_dispatch_queue(intent_id) WHERE state='queued';
+
+-- Preserve existing authorized windows; allow operators to explicitly grant a
+-- longer multi-step session. Legacy one-shot observations still cap at 60s.
+ALTER TABLE reverse_runtime_policies DROP CONSTRAINT IF EXISTS reverse_runtime_policies_max_duration_ms_check;
+ALTER TABLE reverse_runtime_policies ADD CONSTRAINT reverse_runtime_policies_max_duration_ms_check CHECK(max_duration_ms BETWEEN 100 AND 900000);

@@ -11,6 +11,9 @@ import (
 
 type factNotifierKey struct{}
 
+const LegacyRetryIntentDescription = "明确续做 blocked/exhausted 工作，每条工作最多自动续做一次。先查看 execution_result/checkpoint 和真实工具输出，说明故障变化或剩余工作；禁止换措辞重复建单。"
+const RetryIntentDescription = "续做 blocked/exhausted 工作。首次中断可重试；后续须有新保存的证据或检查点，每条最多自动续做 3 次。先读取 execution_result/checkpoint，说明故障变化和接续点；无进展不重复派工，原依赖与预算仍有效。"
+
 func WithFactNotifier(ctx context.Context, fn func(int64, string)) context.Context {
 	return context.WithValue(ctx, factNotifierKey{}, fn)
 }
@@ -48,7 +51,7 @@ func executionPlannerGuidance(tools []actool.CoreTool) string {
 		s += " 无法推进时调用 record_planning_decision，记录 waiting/no_progress、原因及恢复条件；无图变化时不反复调用模型。"
 	}
 	if hasTool(tools, "retry_intent") {
-		s += " 已有工作因外部故障或预算中断时，先读 execution_result/checkpoint，再用 retry_intent 明确续做一次；失败后等待条件变化，不循环派工。"
+		s += " 已有工作因外部故障或预算中断时，先读 execution_result/checkpoint，再用 retry_intent 续做。首次中断可重试，后续必须有新保存的证据或检查点，每条工作最多自动续做 3 次；连续无进展时等待条件变化。不要把正常接续另建为同义工作。"
 	}
 	s += " prove_goal 必须先 node_detail 分别读取目标和证据，使用目标的 evidence_version 作 goal_version、证据的 evidence_version 作 evidence_version，再核对目标全部条件；严禁仅凭摘要和完成状态盖章。旧提示中要求强制产出意图或直接 goal_met 的条款不再适用。"
 	s += " dependency_failed 时先读取 dependency_failures 清单；续做前置工作，或基于已保存版本证据创建不同合同的替代工作，并说明替代来源。不得复制不带依赖的工作单绕过失败前置。"
@@ -128,7 +131,7 @@ func (t *ToolSet) planningDecision() actool.CoreTool {
 }
 
 func (t *ToolSet) retryIntent() actool.CoreTool {
-	return t.writeExpTool("retry_intent", "明确续做 blocked/exhausted 工作，每条工作最多自动续做一次。先查看 execution_result/checkpoint 和真实工具输出，说明故障变化或剩余工作；禁止换措辞重复建单。", obj(map[string]any{"intent_id": idp("本任务待续做意图"), "reason": str("故障变化、续做依据和接续点")}, "intent_id", "reason"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+	return t.writeExpTool("retry_intent", RetryIntentDescription, obj(map[string]any{"intent_id": idp("本任务待续做意图"), "reason": str("故障变化、续做依据和接续点")}, "intent_id", "reason"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 		var a struct {
 			ID     int64  `json:"intent_id"`
 			Reason string `json:"reason"`

@@ -57,6 +57,6 @@ func renderConstraints(rows []db.Constraint) string {
 		b.WriteString("\n规则：\n")
 		b.WriteString(strings.Join(rules, "\n"))
 	}
-	b.WriteString("\n（发现约束之外的新目标/新端口/新主机，不等于获得授权：除非它落在上述允许范围内，否则记为 out-of-scope 事实并跳过，不得为其派生意图或执行动作。）")
+	b.WriteString("\n这些约束与主任务已确认的资产范围共同生效。allow 中明确限定的范围与 deny 中的禁止事项必须遵守；rule 是操作要求，不是额外的资产白名单。此处未列出允许项，不表示已确认的任务范围被清空。已授权范围内且符合约束的工作直接推进，无需重复请求相同许可；发现的新目标仍须核对主任务范围，确实超出范围的只记录线索，不据此扩大执行范围。")
 	return b.String()
 }

@@ -32,6 +32,22 @@ func TestReverseRuntimeExplicitArtifactAndProfilePermission(t *testing.T) {
 	if _, err = d.BeginReverseRuntimeRun(t.Context(), task.ID, artifact.ID, 0, "lab-linux", 3000); err == nil {
 		t.Fatal("unapproved duration")
 	}
+	// Existing grants stay unchanged; longer sessions require an explicit save.
+	current, err := d.ReverseRuntimePolicy(task.ID)
+	if err != nil || current.MaxDurationMS != 2000 {
+		t.Fatal(current, err)
+	}
+	policy.MaxDurationMS = 900000
+	if err = d.SetReverseRuntimePolicy(t.Context(), task.ID, policy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = d.BeginReverseRuntimeRun(t.Context(), task.ID, artifact.ID, 0, "lab-linux", 900001); err == nil {
+		t.Fatal("session over maximum admitted")
+	}
+	policy.MaxDurationMS = 2000
+	if err = d.SetReverseRuntimePolicy(t.Context(), task.ID, policy); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = d.BeginReverseRuntimeRun(t.Context(), task.ID, artifact.ID, 999999999, "lab-linux", 1000); err == nil {
 		t.Fatal("nonrunning work admitted")
 	}

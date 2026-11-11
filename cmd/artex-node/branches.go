@@ -570,7 +570,7 @@ func runBranchPlanner(ctx context.Context, cfg localExecutionConfig, origin, tok
 	autoCoordinator := b.Spec.Coordinator && reply.Policy.AutoDispatch
 	tools := branchPlannerTools(ctx, cfg, origin, token, client, b, reply.Policy, reply.Dependencies, journal, cancel, &waiting, &submitted, autoCoordinator, &coordinationChanged)
 	provider = &branchMeteredProvider{inner: provider, ctx: ctx, cfg: cfg, origin: origin, token: token, client: client, branch: b, unitID: 0, role: role, journal: journal, plannerSnapshot: snapshot}
-	instruction := "You are the persistent planner for this branch only. Review current units, results, accepted dependencies, coordination work pool, and remaining budget before proposing new work. Never replay an unknown or failed unit: propose a new unit with supersedes set to the old unit ID and explain an independent verification route. Use propose_work for one bounded unit, branch_wait when blocked, and submit_branch only with candidate or negative after reviewer coverage."
+	instruction := "You are the persistent planner for this branch only. Review current units, results, accepted dependencies, coordination work pool, and remaining budget before proposing new work. Do not replay operations with unknown outcomes. For a known failure, use its saved progress and failure cause to propose a bounded continuation with supersedes set to the old unit ID; an unchanged operation with an uncertain effect requires verification first. Use propose_work for one bounded unit, branch_wait when blocked, and submit_branch only with candidate or negative after reviewer coverage."
 	if autoCoordinator {
 		instruction = branchCoordinatorInstruction(reply)
 	}
@@ -579,6 +579,8 @@ func runBranchPlanner(ctx context.Context, cfg localExecutionConfig, origin, tok
 		// Coordination has its own narrow responsibility. Do not mix the
 		// configured single-branch planner prompt into this session.
 		systemPrompt = []string{instruction, "Treat policy.constraints in the input as binding project constraints; preserve them when dividing work."}
+	} else {
+		systemPrompt = append(systemPrompt, branchToolProtocol(tools, true, false, reply.Policy.AutoReview))
 	}
 	opt := agentcore.Options{Provider: provider, SystemPrompt: systemPrompt, Tools: tools, PermissionMode: permission.ModeBypass, WorkingDir: work, MaxTurns: rc.MaxTurns, MaxDuration: time.Duration(rc.BudgetSeconds) * time.Second, EnableWebFetch: false, EnableWebSearch: false}
 	s := agentcore.NewSession(opt)
@@ -1485,7 +1487,8 @@ func runBranchUnit(ctx context.Context, cfg localExecutionConfig, origin, token 
 	if reply.Policy.AutoReview && isBranchReviewerRole(spec.Role) {
 		sys = "You are the independent reviewer for this work branch. Verify the specified dependency results against their acceptance criteria, evidence versions and source evidence. Accept when the evidence is sufficient and the criteria are met. Use needs_human when evidence is ambiguous, incomplete, conflicting, or otherwise needs judgment; do not invent uncertainty or require every possible tool record to succeed. Return the normal outcome and summary plus the required review object. Set evidence_versions to the exact provided EvidenceVersion for every reviewed work unit, keyed by decimal unit ID. Set acceptance_met only when the stated criteria are met. Give a concise reason and list only material unresolved uncertainties. Do not claim the master task is complete."
 	}
-	s := agentcore.NewSession(agentcore.Options{Provider: provider, SystemPrompt: []string{portable.SystemPrompt, sys}, Tools: tools, Hooks: hooks, PermissionMode: permission.ModeBypass, WorkingDir: work, MaxTurns: portable.MaxTurns, MaxDuration: time.Duration(contract.BudgetSeconds) * time.Second, EnableWebFetch: false, EnableWebSearch: false})
+	systemPrompt := []string{portable.SystemPrompt, sys, branchToolProtocol(tools, false, isBranchReviewerRole(spec.Role), reply.Policy.AutoReview)}
+	s := agentcore.NewSession(agentcore.Options{Provider: provider, SystemPrompt: systemPrompt, Tools: tools, Hooks: hooks, PermissionMode: permission.ModeBypass, WorkingDir: work, MaxTurns: portable.MaxTurns, MaxDuration: time.Duration(contract.BudgetSeconds) * time.Second, EnableWebFetch: false, EnableWebSearch: false})
 	defer s.Close()
 	var summary strings.Builder
 	var promptErr error

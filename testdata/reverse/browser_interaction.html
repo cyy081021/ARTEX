@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ARTEX Browser Interaction Fixture</title>
+</head>
+<body>
+  <main>
+    <label for="fixture-value">Value</label>
+    <input id="fixture-value" data-testid="value" type="text" autocomplete="off">
+    <button data-testid="submit" type="button">Compute</button>
+    <pre data-testid="result" aria-live="polite">Ready</pre>
+  </main>
+  <script>
+    const valueInput = document.querySelector('[data-testid="value"]');
+    const submitButton = document.querySelector('[data-testid="submit"]');
+    const result = document.querySelector('[data-testid="result"]');
+
+    submitButton.addEventListener('click', async () => {
+      submitButton.disabled = true;
+      result.textContent = 'Loading';
+      try {
+        const response = await fetch('/api/echo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value: valueInput.value })
+        });
+        const payload = await response.json();
+        result.textContent = JSON.stringify(payload);
+        console.log('fixture echo result', payload);
+      } catch (error) {
+        result.textContent = JSON.stringify({ error: String(error) });
+        console.error('fixture echo request failed', String(error));
+      } finally {
+        submitButton.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

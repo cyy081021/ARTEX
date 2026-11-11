@@ -10,6 +10,24 @@
 
 本轮为 `main` 上的协作可用性修复，不创建新 tag 或 Release。当前正式版仍是 `v0.5.0`。
 
+### 逆向连续交互与工作流修复（2026-11-11）
+
+- 新增 `reverse_runtime_session`，支持 Android 上连续启动应用、读取 UI 树与截图、点击、输入、按键、滑动，并在同一 Frida session 中观察调用及方法参数。结束、取消、超时和 Worker 退出时自动清理；Android 设备同一时刻由一个持续会话占用。原 `reverse_observe_runtime` 一次性观察仍最多 60 秒。
+- 新增 `reverse_browser_scenario`，复用 REA 6.8.0 的隔离浏览器启动方式，在一次调用内执行原生多步页面动作并采集 DOM、截图、网络与控制台证据。每次调用创建新上下文；场景来源和显式导航目标受管理员配置的 `allowed_origins` 限制。
+- 静态定位、动态交互、证据保存和独立 Reviewer 形成连续工作流；Reviewer 将证据充分且结论明确的结果标记为接受或拒绝，将证据不足、冲突或无法复现的结果保留为未决。保存的检查点可作为后续续做的进展信号，但不是已独立复核的成果，也不代表任务成功。
+- Runtime policy 保留已有授权值；用户可显式设置 100 毫秒至 900 秒的最大观察时长。任务截止时间或实际 Worker 预算可更早终止执行。新 Node 获得分支工具与提交协议的运行期纠偏；已配对 Node 保持原配对关系。
+- 分支使用对应职责与当前节点实际工具列表，避免调用主端专用接口；自动核验模式不再要求额外人工逐项接受。操作规则不再被误当作资产白名单；已知系统默认 Planner/Reporter 与续做工具说明自动同步，自定义配置保留。中断工作可在保存新检查点或证据后有界续做，最多三次；兼容内容一致的新旧完成回执。
+- 意外调试断开、临时 UI 文件清理失败、最终状态写库失败会明确报告错误；会话结束后继续发来的点击不会被误报为已执行。安装包包含运行脚本、环境配置示例与交互指南。
+
+验证结果：
+
+- 使用自制合成 Android 与网页 fixture 验收。REA 6.8.0 浏览器实际完成 fill、click，并捕获网络响应、console 和 DOM；Android 15 在同一 Frida session 中完成输入、点击、snapshot 与方法参数保存，并通过独立意图接受报告链路。该流程使用合成 fixture，不代表真实模型任务验收。
+- Android timeout、cancel、EOF 后的清理分别在隔离模拟器中验证，包已移除；Python 6 项 mock 测试通过。最终合并后的 Go `-race` 针对性回归为 103 个测试及子测试通过、3 个需显式启用的测试跳过。各包使用独立数据库，避免全局归档队列被其它夹具占用；真实引擎两项验收另行启用并通过。前端生产静态构建及类型检查通过。
+- 针对性命令：`go test -race -p 1 ./server ./db ./agent ./collab ./cmd/artex-node -run 'TestReverse|TestInvokeReverseRuntime|Test(BranchPrompt|ConstraintRules|BranchToolProtocol|AutomaticWorkRetry|RetryProgress|AcceptanceCompatible|ReporterPromptSync|RetryToolDescriptionSync|BranchSetup|BranchPlannerProposes)' -count=1`，实际按包分开执行并分别配置隔离 `ARTEX_PG_DSN`；Python 为 `python -m unittest scripts.test_reverse_runtime -v`。实际引擎验收为设置合成材料清单后的 `go test ./server -run '^TestReverseRealEngineAcceptance$' -count=1`。
+- 提示词与工作流侧补丁另有 37 项针对性测试通过、1 项预览跳过；真实 Node 子进程与本机假模型的两项协作闭环验收通过。五包完整 race 回归为 924 项通过、2 项已确认基线失败、14 项条件跳过：资产继承测试 `coverage.scope=nil`，以及复测测试清理与后台 Worker 读写全局工具钩子的竞态。两项均用修改前源码复现，未在本轮扩改，完整回归不能表述为全绿。
+
+兼容性：保留旧版一次性观察接口及已配对 Node；浏览器场景仅覆盖隔离的 Web 多步交互，不代表完整 Electron 桌面控制、所有 Windows/Linux 调试器或已安装 Appium。上述更新位于未发布 `main`，没有新建 tag 或 Release。使用方式见[逆向 Android 与浏览器交互](docs/reverse-interactive-workflow.md)。
+
 ### 成员任务复用原界面（2026-11-11）
 
 - 替换上一轮成员专用的通用表格与图布局。普通任务、成员任务直接调用共享 `TaskDetailFrame`、`TaskDetailViews` 和原栏目组件；探索图、漏洞关系图、资产覆盖图、资产筛选、报告、复测和逆向档案沿用原实现。

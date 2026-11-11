@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/collab"
 	"github.com/Autumn-27/artex/db"
 )
@@ -307,18 +308,18 @@ func (s *Server) buildBranchSetup(r *http.Request, team, task int64, options bra
 		if strings.HasPrefix(role, "reverse_") {
 			k = "reverse"
 		}
-		prompt := "你是渗透分支的独立技术核验员。只核对授权材料、原始证据和验收标准。区分阴性结果、未验证及反证。不能替代成员独立复核或确认主目标完成。"
+		prompt := collab.BranchRolePrompt(role)
 		if role != "reviewer" {
-			agent, e := s.m.pg.GetAgentByKey(role)
-			if e != nil || agent == nil || !agent.Enabled {
+			configuredAgent, e := s.m.pg.GetAgentByKey(role)
+			if e != nil || configuredAgent == nil || !configuredAgent.Enabled {
 				v.Blockers = append(v.Blockers, "主端所需角色未启用："+role)
 				continue
 			}
-			saved, e := s.m.pg.CurrentPrompt(agent.ID)
+			saved, e := s.m.pg.CurrentPrompt(configuredAgent.ID)
 			if e != nil {
 				return nil, e
 			}
-			prompt = agent.Description + "\n" + saved
+			prompt = agent.BranchPrompt(role, saved, p.Goal)
 		}
 		if len(p.Constraints) > 0 {
 			prompt += "\n\n主任务明确限制（所有分支必须遵守）：\n" + strings.Join(p.Constraints, "\n")

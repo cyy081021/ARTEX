@@ -76,9 +76,6 @@ func validateSatisfied(c WorkContract, r IntentResult) error {
 	}
 	got := make(map[string]bool)
 	if len(r.SatisfiedIDs) > 0 {
-		if len(r.Satisfied) > 0 {
-			return fmt.Errorf("satisfied_ids 与旧版 satisfied 不能同时提交")
-		}
 		for _, id := range r.SatisfiedIDs {
 			if !known[id] {
 				return fmt.Errorf("未知验收 criterion_id：%s", id)
@@ -87,6 +84,30 @@ func validateSatisfied(c WorkContract, r IntentResult) error {
 				return fmt.Errorf("重复验收 criterion_id：%s", id)
 			}
 			got[id] = true
+		}
+		// Older tool schemas may still suggest both fields. Redundant but
+		// consistent receipts are valid; contradictory receipts remain errors.
+		if len(r.Satisfied) > 0 {
+			legacy := map[string]bool{}
+			for _, text := range r.Satisfied {
+				matched := false
+				for _, item := range criteria {
+					if item.Description == text {
+						legacy[item.ID], matched = true, true
+					}
+				}
+				if !matched {
+					return fmt.Errorf("旧版 satisfied 包含未知验收项：%s", text)
+				}
+			}
+			if len(legacy) != len(got) {
+				return fmt.Errorf("satisfied_ids 与旧版 satisfied 内容不一致")
+			}
+			for id := range got {
+				if !legacy[id] {
+					return fmt.Errorf("satisfied_ids 与旧版 satisfied 内容不一致")
+				}
+			}
 		}
 	} else {
 		// Legacy receipts used the full acceptance text. Keep this path for old

@@ -48,6 +48,10 @@ func reaCommand() (string, []string, error) {
 }
 
 func newREASession(ctx context.Context, dir string, progress func(string)) (*reamcp.Client, error) {
+	return newREASessionWithEnvironment(ctx, dir, progress, nil)
+}
+
+func newREASessionWithEnvironment(ctx context.Context, dir string, progress func(string), extraEnv []string) (*reamcp.Client, error) {
 	command, args, err := reaCommand()
 	if err != nil {
 		return nil, err
@@ -55,7 +59,8 @@ func newREASession(ctx context.Context, dir string, progress func(string)) (*rea
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
-	return reamcp.New(ctx, command, args, dir, []string{"PATH=" + filepath.Dir(command) + string(os.PathListSeparator) + os.Getenv("PATH"), "REA_MCP_TOOL_FAMILIES=application,session,android,managed,native,direct,artifact", "REA_MCP_INPUT_SCHEMA_PROFILE=full", "REA_MCP_MAX_RESPONSE_BYTES=16777216"}, progress)
+	env := []string{"PATH=" + filepath.Dir(command) + string(os.PathListSeparator) + os.Getenv("PATH"), "REA_MCP_TOOL_FAMILIES=application,session,android,managed,native,direct,artifact", "REA_MCP_INPUT_SCHEMA_PROFILE=full", "REA_MCP_MAX_RESPONSE_BYTES=16777216"}
+	return reamcp.New(ctx, command, args, dir, append(env, extraEnv...), progress)
 }
 
 type reverseReadiness struct {
@@ -282,6 +287,7 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 	var mu sync.Mutex
 	var client *reamcp.Client
 	var catalog []reamcp.Tool
+	sessions := &reverseSessionManager{ctx: ctx, pg: pg, task: task, info: info, workDir: workDir, sessions: map[string]*reverseSession{}}
 	connect := func(callCtx context.Context) (*reamcp.Client, []reamcp.Tool, error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -301,6 +307,7 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 		return cl, ts, nil
 	}
 	cleanup := func() {
+		sessions.close()
 		mu.Lock()
 		defer mu.Unlock()
 		if client != nil {
@@ -377,7 +384,24 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 		for _, profile := range profiles {
 			for _, allowed := range policy.ProfileIDs {
 				if profile.ID == allowed {
-					environments = append(environments, map[string]any{"id": profile.ID, "name": profile.Name, "platform": profile.Platform, "java_api": profile.Settings["java_bridge_module"] != nil})
+					capabilities := []string{"frida_observation"}
+					if profile.Platform == "android" {
+						capabilities = append(capabilities, "persistent_frida_session", "android_ui_tree", "android_screenshot", "android_tap", "android_input", "android_swipe")
+					}
+					if profile.Platform == "browser" {
+						capabilities = []string{"browser_scenario", "dom", "network", "console", "screenshot"}
+					}
+					secretIDs := []string{}
+					if secrets, ok := profile.Settings["secrets"].([]any); ok {
+						for _, entry := range secrets {
+							if secret, ok := entry.(map[string]any); ok {
+								if id, ok := secret["secret_id"].(string); ok && id != "" {
+									secretIDs = append(secretIDs, id)
+								}
+							}
+						}
+					}
+					environments = append(environments, map[string]any{"id": profile.ID, "name": profile.Name, "platform": profile.Platform, "java_api": profile.Settings["java_bridge_module"] != nil, "capabilities": capabilities, "readiness": "configured_not_runtime_verified", "allowed_origins": profile.Settings["allowed_origins"], "secret_ids": secretIDs})
 					break
 				}
 			}
@@ -485,6 +509,7 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 		}))
 		tools = append(tools, reverseConclusionTools(pg, task, info, workDir)...)
 		tools = append(tools, reverseDebugTool(pg, task, info, workDir))
+		tools = append(tools, sessions.tool(), reverseBrowserTool(pg, task, info, workDir))
 	}
 	tools = append(tools, reverseConclusionReadTools(pg, task)...)
 	if len(tools) > 0 {

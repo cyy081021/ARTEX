@@ -505,6 +505,8 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedAutoReportFindingBinding()
 	s.unbindGoalMetDefault()
 	s.seedReporterAgent()             // 预置「报告撰写」agent + 工具绑定 + finding 触发器(一次性)
+	s.syncReporterPrompt()            // 仅升级已知系统默认，保留用户编辑与删除
+	s.syncRetryToolDescription()      // 与有界接续策略一致，不改变启用、绑定或参数
 	s.upgradeReporterTriggerMessage() // 老库补迁移:让 reporter 回传 evidence_version(一次性)
 	s.seedFindingTrafficTools()       // 增加可选证据参数及只读证据工具，保留用户配置
 	s.seedFindingWorkflowTools()

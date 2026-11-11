@@ -49,8 +49,8 @@ func (d *DB) ReverseRuntimePolicy(taskID int64) (ReverseRuntimePolicy, error) {
 }
 
 func (d *DB) SetReverseRuntimePolicy(ctx context.Context, taskID int64, p ReverseRuntimePolicy) error {
-	if p.MaxDurationMS < 100 || p.MaxDurationMS > 60000 || (p.Enabled && (len(p.ProfileIDs) == 0 || len(p.ArtifactIDs) == 0)) {
-		return errors.New("请选择环境、材料和 100–60000ms 的观察窗口")
+	if p.MaxDurationMS < 100 || p.MaxDurationMS > 900000 || (p.Enabled && (len(p.ProfileIDs) == 0 || len(p.ArtifactIDs) == 0)) {
+		return errors.New("请选择环境、材料和 100–900000ms 的观察窗口")
 	}
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {

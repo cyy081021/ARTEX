@@ -58,7 +58,7 @@ func reverseRuntimeProfiles() ([]reverseRuntimeProfile, error) {
 	seen := map[string]bool{}
 	for i := range profiles {
 		p := &profiles[i]
-		if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`).MatchString(p.ID) || seen[p.ID] || (p.Platform != "linux" && p.Platform != "windows" && p.Platform != "android") || p.Command == "" {
+		if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`).MatchString(p.ID) || seen[p.ID] || (p.Platform != "linux" && p.Platform != "windows" && p.Platform != "android" && p.Platform != "browser") || (p.Command == "" && p.Platform != "browser") {
 			return nil, errors.New("运行环境必须有唯一 ID、支持的平台及启动命令")
 		}
 		seen[p.ID] = true
@@ -185,10 +185,16 @@ func (s *Server) reverseDebugRoutes(mux *http.ServeMux) {
 				}
 				defer func() { <-limit }()
 				ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
-				raw, err := invokeReverseRuntime(ctx, p, map[string]any{"operation": "doctor"})
-				cancel()
 				var doctor map[string]any
-				_ = json.Unmarshal(raw, &doctor)
+				var err error
+				if p.Platform == "browser" {
+					doctor, err = reverseBrowserDoctor(ctx, p)
+				} else {
+					var raw []byte
+					raw, err = invokeReverseRuntime(ctx, p, map[string]any{"operation": "doctor"})
+					_ = json.Unmarshal(raw, &doctor)
+				}
+				cancel()
 				out[i] = map[string]any{"id": p.ID, "name": p.Name, "platform": p.Platform, "available": err == nil && doctor["available"] == true && doctor["platform"] == p.Platform, "engine_version": doctor["version"], "limits": "仅已授权材料；进程隔离不等于沙箱"}
 			}(i, p)
 		}
@@ -262,6 +268,9 @@ func reverseDebugTool(pg *db.DB, task *db.Task, info agent.RunInfo, workDir stri
 		if len(a.Script) > 128*1024 || strings.TrimSpace(a.Script) == "" {
 			return actool.Errorf("观察脚本不能为空，且不超过 128 KiB"), nil
 		}
+		if a.DurationMS < 100 || a.DurationMS > 60000 {
+			return actool.Errorf("一次性观察上限为 60 秒；多步观察请使用 reverse_runtime_session"), nil
+		}
 		profiles, err := reverseRuntimeProfiles()
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
@@ -273,9 +282,14 @@ func reverseDebugTool(pg *db.DB, task *db.Task, info agent.RunInfo, workDir stri
 				break
 			}
 		}
-		if selected == nil {
+		if selected == nil || selected.Platform == "browser" {
 			return actool.Errorf("运行环境未配置"), nil
 		}
+		release, err := acquireReverseDevice(*selected)
+		if err != nil {
+			return actool.Errorf(err.Error()), nil
+		}
+		defer release()
 		artifact, err := pg.GetReverseArtifact(task.ID, a.ArtifactID)
 		if err != nil || artifact == nil {
 			return actool.Errorf("材料不存在"), nil

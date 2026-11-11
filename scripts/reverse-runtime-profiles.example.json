@@ -20,5 +20,12 @@
       "allow_package_install": true,
       "java_bridge_module": "/absolute/path/to/node_modules/frida-java-bridge/index.js"
     }
+  },
+  {
+    "id": "browser-lab", "name": "浏览器交互环境", "platform": "browser",
+    "settings": {
+      "executable_path": "/absolute/path/to/chrome",
+      "allowed_origins": ["http://127.0.0.1:8080"]
+    }
   }
 ]

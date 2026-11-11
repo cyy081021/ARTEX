@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/collab"
 	"github.com/Autumn-27/artex/db"
 )
@@ -204,7 +205,7 @@ func (s *Server) branchEnable(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, 409, "无法读取规划角色提示词")
 				return
 			}
-			in.Policy.PlannerPrompts[kind] = v.Description + "\n" + prompt
+			in.Policy.PlannerPrompts[kind] = agent.BranchPrompt(key, prompt, in.Policy.Goal)
 		}
 	}
 	if in.Policy.Roles == nil {
@@ -222,7 +223,7 @@ func (s *Server) branchEnable(w http.ResponseWriter, r *http.Request) {
 			if _, exists := in.Policy.Roles[role]; exists {
 				continue
 			}
-			prompt := "你是渗透分支的独立技术核验员。只核对授权材料、原始证据和验收标准。区分阴性结果、未验证及反证。不能替代成员独立复核或确认主目标完成。"
+			prompt := collab.BranchRolePrompt(role)
 			if role != "reviewer" {
 				v, e := s.m.pg.GetAgentByKey(role)
 				if e != nil || v == nil || !v.Enabled {
@@ -234,7 +235,7 @@ func (s *Server) branchEnable(w http.ResponseWriter, r *http.Request) {
 					writeErr(w, 409, "无法读取执行角色提示词")
 					return
 				}
-				prompt = v.Description + "\n" + saved
+				prompt = agent.BranchPrompt(role, saved, in.Policy.Goal)
 			}
 			in.Policy.Roles[role] = collab.ExecutionConfig{Version: 1, Kind: kind, Role: role, SystemPrompt: prompt, MaxTurns: 16, BudgetSeconds: in.Policy.MaxToolSeconds, Capabilities: []string{}}
 		}
