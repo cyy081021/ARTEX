@@ -9,7 +9,7 @@ AI 自主渗透测试与逆向分析系统（Go 后端 + Next.js 前端）
 
 📦 **源码仓库：** [cyy081021/ARTEX](https://github.com/cyy081021/ARTEX) · **ARTEX Releases：** [正式版本发布页](https://github.com/cyy081021/ARTEX/releases)
 
-当前正式版本为 **v0.5.0**。`artex-*` 标签是历史源码里程碑，不是正式下载版本；正式版本使用 `vX.Y.Z`，在线更新从本仓库 Releases 获取版本和校验文件。
+当前正式版本为 **v0.6.0**。`artex-*` 标签是历史源码里程碑，不是正式下载版本；正式版本使用 `vX.Y.Z`，在线更新从本仓库 Releases 获取版本和校验文件。
 
 </div>
 
@@ -29,6 +29,7 @@ AI 自主渗透测试与逆向分析系统（Go 后端 + Next.js 前端）
 
 | 标签 | 类型 | 摘要 |
 | --- | --- | --- |
+| [`v0.6.0`](RELEASES.md#v060) | 正式版 | 自动接入与协作派发、成员原生任务界面、Android/浏览器连续逆向交互及工作流修复 |
 | [`v0.5.0`](RELEASES.md#v050) | 正式版 | 共享主任务执行分支、团队指导与回执、跨流程协助、证据失效和独立复核 |
 | [`v0.4.1`](RELEASES.md#v041) | 正式版 | 内置提示词安全升级、版本并发保护及资产覆盖统计修正 |
 | [`v0.4.0`](RELEASES.md#v040) | 正式版 | 迁移正式下载与在线更新源，建立二进制和容器发布流程，包含协作 v1 功能 |
@@ -40,7 +41,7 @@ AI 自主渗透测试与逆向分析系统（Go 后端 + Next.js 前端）
 
 执行机制见 [执行链路验收与调度](docs/执行链路验收与调度.md)。首次跨设备接入见 [成员网页、TLS、Node 与权限配置步骤](docs/team-onboarding.md)；已有部署的节点配置和权限边界见 [协作配置与执行说明](examples/README.md)。
 
-`main` 的新协作入口支持自动生成配置、设备匹配、工作派发和明确结果自动接收。任务详情以会话和进度为主，疑点集中进入人工复审；使用步骤见 [团队自动协作](docs/team-auto-collaboration.md)。此项尚未建立新的正式 tag。
+`v0.6.0` 的协作入口支持自动生成配置、设备匹配、工作派发和明确结果自动接收。任务详情以会话和进度为主，疑点集中进入人工复审；使用步骤见 [团队自动协作](docs/team-auto-collaboration.md)。逆向连续操作见 [Android 与浏览器交互](docs/reverse-interactive-workflow.md)。
 
 ---
 
@@ -208,7 +209,7 @@ cd ARTEX
 ```bash
 cd ARTEX
 git pull                       # 更新 compose / 脚本（可选）
-# 指定正式版本：在 .env 设 ARTEX_TAG=v0.5.0；不设则使用 latest（当前指向最新正式版）
+# 指定正式版本：在 .env 设 ARTEX_TAG=v0.6.0；不设则使用 latest（当前指向最新正式版）
 docker compose pull artex
 docker compose up -d artex     # 换新镜像重启 → 自动迁移 schema
 docker image prune -f          # 清理旧镜像（可选）
