@@ -111,6 +111,8 @@ func (s *Server) teamTaskNative(w http.ResponseWriter, r *http.Request) {
 			handler = s.reverseArtifactDownload
 		} else {
 			switch strings.Join(parts[2:], "/") {
+			case "llm/resolution":
+				handler = s.taskLLMResolutionHandler
 			case "coverage":
 				handler = s.taskCoverage
 			case "coverage-graph":

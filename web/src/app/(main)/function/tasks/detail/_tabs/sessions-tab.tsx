@@ -4,26 +4,14 @@ import * as React from "react";
 
 import {
   ArrowUpIcon,
-  BrainIcon,
-  ChevronDownIcon,
-  CircleCheckIcon,
-  CircleSlashIcon,
   CircleXIcon,
-  ClockIcon,
-  HistoryIcon,
   Loader2Icon,
   PaperclipIcon,
-  PauseIcon,
-  PlusIcon,
-  RadioIcon,
-  RotateCwIcon,
-  ShieldAlertIcon,
   SquareIcon,
   Trash2Icon,
-  UserIcon,
+  ClockIcon,
   WifiOffIcon,
   XIcon,
-  ZapOffIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -33,6 +21,7 @@ import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-que
 import { TodoPopover } from "@/components/todo-popover";
 import { Transcript } from "@/components/transcript";
 import { TeamSessionMessages } from "@/components/team-shared-messages";
+import { SessionSidebar, TaskSessionLayout, TaskSessionPanel, TokenMetrics } from "@/components/task-session-layout";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -167,67 +156,6 @@ function mergeBySeq(current: Activity[], incoming: Activity[]): Activity[] {
   return [...bySeq.values()].sort((p, q) => p.seq - q.seq);
 }
 
-// statusIcon maps a session status to its icon. Worker terminal states are
-// distinct & color-coded: 完成(绿勾圈) / 取消停止(琥珀斜杠圈) / 出错(红叉圈) /
-// 步数耗尽(紫). running=蓝色转圈, pending(待领取)=灰时钟.
-function statusIcon(status: SessionStatus) {
-  switch (status) {
-    case "running": // 执行中
-      return <Loader2Icon className="size-3.5 animate-spin text-blue-500" />;
-    case "paused":
-      return <PauseIcon className="size-3.5 text-amber-500" />;
-    case "pending": // 待领取(open intent)
-      return <ClockIcon className="size-3.5 text-muted-foreground" />;
-    case "done": // 完成
-      return <CircleCheckIcon className="size-3.5 text-emerald-500" />;
-    case "stopped": // 取消/停止(被 planner 终止)
-      return <CircleSlashIcon className="size-3.5 text-amber-500" />;
-    case "blocked": // 出错
-      return <CircleXIcon className="size-3.5 text-red-500" />;
-    case "exhausted": // 步数耗尽(撞 max_turns)
-      return <ZapOffIcon className="size-3.5 text-violet-500" />;
-    case "deleted": // 用户假删除
-      return <CircleSlashIcon className="size-3.5 text-muted-foreground" />;
-  }
-}
-
-// fmtTokens renders a compact token count (1234 → 1.2k, 2_000_000 → 2M).
-function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
-  return String(n);
-}
-
-const TokenMetrics = React.forwardRef<
-  HTMLSpanElement,
-  React.ComponentPropsWithoutRef<"span"> & {
-    input: number;
-    cache: number;
-    output: number;
-    labels?: "short" | "long";
-  }
->(({ input, cache, output, labels = "short", className, ...props }, ref) => {
-  const names = labels === "short" ? ["入", "缓", "出"] : ["input", "cache", "output"];
-  const values = [input, cache, output];
-  return (
-    <span
-      ref={ref}
-      className={cn("inline-flex min-w-0 flex-wrap items-center gap-1 text-muted-foreground", className)}
-      {...props}
-    >
-      {values.map((value, index) => (
-        <React.Fragment key={names[index]}>
-          <span>{names[index]}</span>
-          <Badge variant="secondary" className="h-5 px-1.5 font-mono tabular-nums">
-            {fmtTokens(value)}
-          </Badge>
-        </React.Fragment>
-      ))}
-    </span>
-  );
-});
-TokenMetrics.displayName = "TokenMetrics";
-
 // fmtDuration renders an elapsed milliseconds span compactly (90s → 1m30s).
 function fmtDuration(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -237,13 +165,6 @@ function fmtDuration(ms: number): string {
   const h = Math.floor(m / 60);
   return `${h}h${String(m % 60).padStart(2, "0")}m`;
 }
-
-const roleMeta = {
-  mainagent: { label: "主 Agent", icon: UserIcon },
-  planner: { label: "规划 Planner", icon: BrainIcon },
-  worker: { label: "Workers", icon: RadioIcon },
-  system: { label: "系统审计", icon: HistoryIcon },
-} as const;
 
 // The main-agent session is the interactive entry point of this tab and has no
 // dedicated backend "sessions" endpoint — it is a fixed UI affordance whose
@@ -339,114 +260,6 @@ function intentToSession(n: TaskNode): Session {
     source_task_id: n.source_task_id,
     inherited: n.inherited,
   };
-}
-
-function SessionItem({
-  s,
-  active,
-  displayTitle,
-  hasPending,
-  unread,
-  onClick,
-  onCancel,
-  controlling,
-  deleted,
-  executorBadge,
-}: {
-  s: Session;
-  active: boolean;
-  displayTitle: string;
-  hasPending?: boolean;
-  unread?: number;
-  onClick: () => void;
-  onCancel?: () => void;
-  controlling?: boolean;
-  deleted?: boolean;
-  executorBadge?: string;
-}) {
-  const icon = deleted ? (
-    <Trash2Icon className="size-3.5 text-destructive" />
-  ) : s.role === "worker" ? (
-    statusIcon(s.status)
-  ) : s.live ? (
-    <Loader2Icon className="size-3.5 animate-spin text-blue-500" />
-  ) : null;
-
-  const cancellable =
-    s.role === "worker" &&
-    !s.inherited &&
-    !deleted &&
-    // pending = 待领(open)意图;连同运行中/已暂停都允许删除。
-    (s.status === "running" || s.status === "paused" || s.status === "pending");
-  return (
-    <div
-      className={cn(
-        "group/session flex w-full items-center rounded-md transition-colors",
-        active ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
-      )}
-    >
-      <button
-        type="button"
-        onClick={onClick}
-        className="flex min-w-0 flex-1 items-center gap-1 px-2 py-1.5 text-left text-sm"
-      >
-        {icon ?? <span className="size-3.5 shrink-0" />}
-        {s.intent_id && (
-          <span className="shrink-0 rounded bg-muted px-1 py-0.5 font-mono text-[10px] tabular-nums text-muted-foreground">
-            #{s.intent_id}
-          </span>
-        )}
-        {s.inherited && s.source_task_id && (
-          <Badge variant="outline" className="shrink-0">
-            来源 #{s.source_task_id}
-          </Badge>
-        )}
-        {executorBadge && (
-          <Badge variant="secondary" className="h-5 shrink-0 px-1.5 font-mono text-[10px] tabular-nums">
-            {executorBadge}
-          </Badge>
-        )}
-        <span
-          className={cn("min-w-0 flex-1 truncate text-sm font-medium", deleted && "text-muted-foreground line-through")}
-        >
-          {displayTitle}
-        </span>
-        {deleted && (
-          <Badge variant="outline" className="shrink-0 border-destructive/40 text-destructive">
-            已删除
-          </Badge>
-        )}
-        {hasPending && <ShieldAlertIcon className="size-3.5 shrink-0 text-amber-500" />}
-        {!active && unread ? (
-          <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 dark:text-blue-400">
-            {unread > 99 ? "99+" : unread}
-          </span>
-        ) : null}
-        {s.live && (
-          <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
-            <span className="size-1 animate-pulse rounded-full bg-blue-500" />
-            实时
-          </span>
-        )}
-      </button>
-      {cancellable && (
-        <div className="flex shrink-0 items-center gap-0.5 pr-1 opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover/session:opacity-100 sm:group-focus-within/session:opacity-100">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            onClick={onCancel}
-            disabled={controlling}
-            title="删除该意图（需填写原因，可选假删除/真删除）"
-            aria-label="删除该意图（需填写原因，可选假删除/真删除）"
-            className="text-destructive hover:text-destructive"
-          >
-            <Trash2Icon />
-          </Button>
-        </div>
-      )}
-    </div>
-  );
 }
 
 function truncateWorkerAssetLabel(value: string, maxChars = 30): string {
@@ -595,7 +408,10 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
     setCollaborationCanSteer(false);
     setCollaborationLoaded(false);
     void load();
-    return () => { alive = false; clearTimeout(timer); };
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
   }, [taskId]);
 
   async function pickFiles(files: FileList | null) {
@@ -1080,7 +896,9 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
       esRef.current = openActivityStream<Activity>({
         url: (cursor) => sseUrl(`/api/exploration/activity/stream?task=${encodeURIComponent(taskId)}&since=${cursor}`),
         cursor: snapshotRef.current,
-        onState: (state) => { if (alive) setStreamState(state); },
+        onState: (state) => {
+          if (alive) setStreamState(state);
+        },
         onActivity: (a) => {
           if ((a.kind === "llm_switch" || a.kind === "llm_failover") && !llmToastSeqRef.current.has(a.seq)) {
             llmToastSeqRef.current.add(a.seq);
@@ -1169,7 +987,6 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
             unread: 0,
           };
         });
-
       })
       .catch((err) => {
         if (!alive || reqTokenRef.current.mainboot !== token) return;
@@ -1407,9 +1224,8 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
   };
 
   const active = sessions.find((s) => s.id === activeId) ?? MAIN_SESSION;
-  const activeTeamSession = active.role === "worker"
-    ? collaborationBySession.get(`intent:${active.intent_id}`)
-    : undefined;
+  const activeTeamSession =
+    active.role === "worker" ? collaborationBySession.get(`intent:${active.intent_id}`) : undefined;
   const activeIsRemote = !!activeTeamSession && activeTeamSession.executor_id > 0;
   const side = useSideQuestions(
     active.role === "mainagent"
@@ -1684,7 +1500,11 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
     const message = workerMessage.trim();
     // Remote workers use the team message protocol with its assignment/epoch fence.
     // Never fall back to the local worker endpoint for a remote execution session.
-    if (!collaborationLoaded || (intentId && collaborationSessions.some((session) => session.id === `intent:${intentId}` && session.executor_id > 0))) {
+    if (
+      !collaborationLoaded ||
+      (intentId &&
+        collaborationSessions.some((session) => session.id === `intent:${intentId}` && session.executor_id > 0))
+    ) {
       return;
     }
     if (side.handleCommand(message, () => setWorkerMessage(""))) return;
@@ -1733,7 +1553,8 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
   const showLoader = !activeState || (activeState.loading && !activeState.loaded);
   const reverseAgentKeyForSession = (session: Session): string | undefined => {
     const items = store[keyForSession(session)]?.items ?? [];
-    const activityKey = [...items].reverse().find((item) => item.metadata?.agent_config?.key)?.metadata?.agent_config?.key;
+    const activityKey = [...items].reverse().find((item) => item.metadata?.agent_config?.key)?.metadata
+      ?.agent_config?.key;
     if (session.role === "mainagent") return "reverse_main";
     if (session.role === "planner") {
       if (activityKey === "reverse_goals" || activityKey === "goals") return activityKey;
@@ -1745,12 +1566,16 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
       const payload = (node as { payload?: unknown }).payload;
       if (payload && typeof payload === "object") {
         const contract = (payload as { contract?: { execution_role?: unknown } }).contract;
-        if (typeof contract?.execution_role === "string" && ["reverse_static", "reverse_dynamic", "reverse_reviewer"].includes(contract.execution_role)) {
+        if (
+          typeof contract?.execution_role === "string" &&
+          ["reverse_static", "reverse_dynamic", "reverse_reviewer"].includes(contract.execution_role)
+        ) {
           return contract.execution_role;
         }
       }
     }
-    if (activityKey && ["reverse_static", "reverse_dynamic", "reverse_reviewer"].includes(activityKey)) return activityKey;
+    if (activityKey && ["reverse_static", "reverse_dynamic", "reverse_reviewer"].includes(activityKey))
+      return activityKey;
     return undefined;
   };
   const resolutionForSession = (session: Session): TaskLLMResolution | undefined => {
@@ -1777,283 +1602,189 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
 
   return (
     <TooltipProvider delayDuration={300}>
-      {/* 高度预留：页面头部（标题行 + 目标 + Tabs ≈ 7.5rem）+ 内容内边距。手机端 p-4、
-        桌面端 lg:p-6，且桌面还要留出滚动余量，所以两档分别预留 10rem / 13rem —— 手机端
-        沿用 13rem 会白白吃掉 3rem 的记录高度。 */}
-      <div
-        className={cn(
-          "grid h-[calc(100svh-10rem)] min-h-0 grid-cols-1 gap-4",
-          listOpen ? "grid-rows-[minmax(0,40svh)_minmax(0,1fr)]" : "grid-rows-[auto_minmax(0,1fr)]",
-          "lg:h-[calc(100svh-13rem)] lg:grid-cols-[18rem_1fr] lg:grid-rows-[minmax(0,1fr)]",
-        )}
-      >
-        {/* Left: session list */}
-        <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border bg-card">
-          <div className="border-b px-3 py-2">
-            <div className="flex items-center justify-between gap-2">
+      <TaskSessionLayout listOpen={listOpen} onListOpenChange={setListOpen}>
+        <SessionSidebar
+          sessions={sessions}
+          activeId={activeId}
+          activeDisplayTitle={activeDisplayTitle}
+          hiddenUnread={hiddenUnread}
+          taskTokens={taskTokens}
+          listOpen={listOpen}
+          onListOpenChange={setListOpen}
+          headerSlot={
+            !MOCK ? (
               <button
+                className={cn(
+                  "inline-flex items-center gap-1 text-[10px]",
+                  sseLive ? "text-emerald-500" : "text-amber-500",
+                )}
+                title={
+                  sseLive
+                    ? "实时连接正常"
+                    : latestSyncAt > Date.now() - 15_000
+                      ? "实时通道恢复中，当前会话正在补取同步；点击重试实时连接"
+                      : "正在恢复连接；点击立即重试"
+                }
                 type="button"
-                onClick={() => setListOpen((open) => !open)}
-                aria-expanded={listOpen}
-                aria-controls="session-list-panel"
-                className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs font-medium text-muted-foreground lg:pointer-events-none"
+                onClick={() => esRef.current?.reconnect()}
+                aria-live="polite"
               >
-                <ChevronDownIcon
-                  className={cn("size-3.5 shrink-0 transition-transform lg:hidden", !listOpen && "-rotate-90")}
-                />
-                <span className="shrink-0">会话列表</span>
-                {!listOpen && (
+                {sseLive ? (
                   <>
-                    <span className="min-w-0 truncate text-foreground lg:hidden" title={activeDisplayTitle}>
-                      · {activeDisplayTitle}
-                    </span>
-                    {hiddenUnread > 0 && (
-                      <span className="inline-flex min-w-4 shrink-0 items-center justify-center rounded-full bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 lg:hidden dark:text-blue-400">
-                        {hiddenUnread > 99 ? "99+" : hiddenUnread}
-                      </span>
-                    )}
+                    <span className="size-1 animate-pulse rounded-full bg-emerald-500" />
+                    实时
+                  </>
+                ) : (
+                  <>
+                    <WifiOffIcon className="size-3" />
+                    {latestSyncAt > Date.now() - 15_000
+                      ? "补取同步"
+                      : streamState === "connecting"
+                        ? "连接中"
+                        : "重连中"}
                   </>
                 )}
               </button>
-              {!MOCK && (
-                <button
-                  className={cn(
-                    "inline-flex items-center gap-1 text-[10px]",
-                    sseLive ? "text-emerald-500" : "text-amber-500",
-                  )}
-                  title={sseLive ? "实时连接正常" : latestSyncAt > Date.now() - 15_000 ? "实时通道恢复中，当前会话正在补取同步；点击重试实时连接" : "正在恢复连接；点击立即重试"}
-                  type="button"
-                  onClick={() => esRef.current?.reconnect()}
-                  aria-live="polite"
-                >
-                  {sseLive ? (
-                    <>
-                      <span className="size-1 animate-pulse rounded-full bg-emerald-500" />
-                      实时
-                    </>
-                  ) : (
-                    <>
-                      <WifiOffIcon className="size-3" />
-                      {latestSyncAt > Date.now() - 15_000 ? "补取同步" : streamState === "connecting" ? "连接中" : "重连中"}
-                    </>
-                  )}
-                </button>
-              )}
-            </div>
-            {taskTokens && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1 text-xs text-muted-foreground">
-                    <span>任务总计</span>
-                    <span>·</span>
-                    <TokenMetrics
-                      input={taskTokens.input_tokens}
-                      cache={taskTokens.cache_read_tokens}
-                      output={taskTokens.output_tokens}
-                    />
-                  </div>
-                </TooltipTrigger>
-                <TooltipContent>
-                  输入 {taskTokens.input_tokens.toLocaleString()} · 输出 {taskTokens.output_tokens.toLocaleString()} ·
-                  缓存读取 {taskTokens.cache_read_tokens.toLocaleString()} · 缓存写入{" "}
-                  {taskTokens.cache_write_tokens.toLocaleString()}
-                </TooltipContent>
-              </Tooltip>
-            )}
-          </div>
-          <ScrollArea
-            id="session-list-panel"
-            type="auto"
-            className={cn(
-              "min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!",
-              !listOpen && "max-lg:hidden",
-            )}
-          >
-            <div className="flex w-full flex-col gap-3 p-2">
-              {(["mainagent", "planner", "system", "worker"] as const).map((role) => {
-                const items = grouped[role];
-                if (!items.length) return null;
-                const Meta = roleMeta[role];
-                return (
-                  <div key={role} className="flex flex-col gap-0.5">
-                    <div className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium text-muted-foreground">
-                      <Meta.icon className="size-3.5" />
-                      {Meta.label}
-                      {role === "mainagent" && (
-                        <button
-                          type="button"
-                          onClick={() => setConfirmNewMain(true)}
-                          disabled={creatingMain}
-                          title="新建主 Agent 会话（清空上下文，任务状态保留）"
-                          aria-label="新建主 Agent 会话"
-                          className="ml-auto flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent/60 hover:text-foreground disabled:opacity-50"
-                        >
-                          {creatingMain ? (
-                            <Loader2Icon className="size-3.5 animate-spin" />
-                          ) : (
-                            <PlusIcon className="size-3.5" />
-                          )}
-                          新建
-                        </button>
-                      )}
-                    </div>
-                    {items.map((s) => {
-                      const meta = s.role === "worker" ? sessionMeta.get(s.id) : undefined;
-                      return (
-                        <SessionItem
-                          key={s.id}
-                          s={s}
-                          active={s.id === activeId}
-                          displayTitle={meta?.title ?? s.title}
-                          hasPending={hasPendingForSession(s)}
-                          unread={store[keyForSession(s)]?.unread}
-                          onClick={() => {
-                            approvalFocus.close();
-                            setActiveId(s.id);
-                            setListOpen(false); // 手机端选完即收起，把高度还给会话记录
-                            setWorkerMessage("");
-                            setWorkerMessageRequestId("");
-                          }}
-                          controlling={controllingIntent === s.intent_id}
-                          deleted={meta?.deleted}
-                          executorBadge={s.role === "worker" && collaborationBySession.has(`intent:${s.intent_id}`)
-                            ? collaborationBySession.get(`intent:${s.intent_id}`)!.executor_id === 0
-                              ? "本机"
-                              : `设备 #${collaborationBySession.get(`intent:${s.intent_id}`)!.executor_id}`
-                            : undefined}
-                          onCancel={() => {
-                            setCancelIntent(s);
-                          }}
-                        />
-                      );
-                    })}
-                    {role === "worker" && intentsHasMore && (
-                      <button
-                        type="button"
-                        onClick={loadOlderIntents}
-                        disabled={loadingOlderIntents}
-                        className="mt-0.5 flex items-center justify-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent/50"
-                      >
-                        {loadingOlderIntents ? (
-                          <Loader2Icon className="size-3.5 animate-spin" />
-                        ) : (
-                          <RotateCwIcon className="size-3.5" />
-                        )}
-                        加载更早的 Worker
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
-              {mainLoaded && !workerSessions.length && (
-                <div className="px-2 py-1 text-xs text-muted-foreground">暂无运行中的 Worker 会话。</div>
-              )}
-            </div>
-          </ScrollArea>
-        </div>
-
+            ) : null
+          }
+          onSelect={(session) => {
+            approvalFocus.close();
+            setActiveId(session.id);
+            setListOpen(false);
+            setWorkerMessage("");
+            setWorkerMessageRequestId("");
+          }}
+          onCreateMain={() => setConfirmNewMain(true)}
+          creatingMain={creatingMain}
+          onCancel={setCancelIntent}
+          metadata={Object.fromEntries(
+            sessions.map((session) => {
+              const meta = session.role === "worker" ? sessionMeta.get(session.id) : undefined;
+              const team =
+                session.role === "worker" ? collaborationBySession.get(`intent:${session.intent_id}`) : undefined;
+              return [
+                session.id,
+                {
+                  displayTitle: meta?.title ?? session.title,
+                  hasPending: hasPendingForSession(session),
+                  unread: store[keyForSession(session)]?.unread,
+                  deleted: meta?.deleted,
+                  controlling: controllingIntent === session.intent_id,
+                  executorBadge: team ? (team.executor_id === 0 ? "本机" : `设备 #${team.executor_id}`) : undefined,
+                },
+              ];
+            }),
+          )}
+          hasMoreWorkers={intentsHasMore}
+          loadingMoreWorkers={loadingOlderIntents}
+          onLoadMoreWorkers={loadOlderIntents}
+          emptyWorkers={mainLoaded && !workerSessions.length}
+        />
         {/* Right: transcript */}
         <SideQuestionWorkspace
           side={side}
           label={active.role === "worker" ? `Worker #${active.intent_id} · ${activeDisplayTitle}` : activeDisplayTitle}
         >
-          <div className="flex min-h-0 flex-1 min-w-0 flex-col overflow-hidden rounded-lg border bg-card">
-            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-b px-3 py-2 sm:px-4 sm:py-2.5">
-              {(() => {
-                const isWorker = active.role === "worker";
-                const meta = isWorker ? sessionMeta.get(active.id) : undefined;
-                // Worker: the intent moved into the transcript as a message, so the
-                // header shows a stable generic label (intent JSON stays on hover).
-                const title = isWorker ? "Worker 执行会话" : active.title;
-                const titleEl = <span className="min-w-0 truncate text-sm font-medium">{title}</span>;
-                return meta?.json ? (
+          <TaskSessionPanel
+            header={
+              <>
+                {(() => {
+                  const isWorker = active.role === "worker";
+                  const meta = isWorker ? sessionMeta.get(active.id) : undefined;
+                  // Worker: the intent moved into the transcript as a message, so the
+                  // header shows a stable generic label (intent JSON stays on hover).
+                  const title = isWorker ? "Worker 执行会话" : active.title;
+                  const titleEl = <span className="min-w-0 truncate text-sm font-medium">{title}</span>;
+                  return meta?.json ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>{titleEl}</TooltipTrigger>
+                      <TooltipContent side="bottom" align="start" className="max-h-80 max-w-sm overflow-auto p-0">
+                        <pre className="p-2 text-[10px] leading-relaxed">{JSON.stringify(meta.json, null, 2)}</pre>
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : (
+                    titleEl
+                  );
+                })()}
+                <SideQuestionButton side={side} />
+                {activeResolution && (
                   <Tooltip>
-                    <TooltipTrigger asChild>{titleEl}</TooltipTrigger>
-                    <TooltipContent side="bottom" align="start" className="max-h-80 max-w-sm overflow-auto p-0">
-                      <pre className="p-2 text-[10px] leading-relaxed">{JSON.stringify(meta.json, null, 2)}</pre>
-                    </TooltipContent>
-                  </Tooltip>
-                ) : (
-                  titleEl
-                );
-              })()}
-              <SideQuestionButton side={side} />
-              {activeResolution && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Badge
-                      variant="outline"
-                      className="max-w-28 shrink-0 font-normal"
-                      aria-label={
-                        activeResolution.available ? `当前配置：${resolutionLabel(activeResolution)}` : "模型不可用"
-                      }
-                    >
-                      <span className="truncate">
-                        {activeResolution.available ? resolutionLabel(activeResolution) : "模型不可用"}
-                      </span>
-                    </Badge>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-xs [overflow-wrap:anywhere]">
-                    {activeResolution.available
-                      ? [resolutionLabel(activeResolution), activeResolution.model].filter(Boolean).join(" / ")
-                      : activeResolution.reason || "没有可用的 LLM 配置"}
-                  </TooltipContent>
-                </Tooltip>
-              )}
-              {activeAssets && activeAssets.length > 0 && <WorkerAssetBadge assets={activeAssets} />}
-              {active.inherited && active.source_task_id && (
-                <Badge variant="outline">来源任务 #{active.source_task_id} · 只读历史</Badge>
-              )}
-              {active.live && (
-                <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
-                  <span className="size-1 animate-pulse rounded-full bg-blue-500" />
-                  实时
-                </span>
-              )}
-              {activeState?.hasMore && (
-                <span className="text-[10px] text-muted-foreground" title="向上滚动加载更早历史">
-                  ↑ 更早历史
-                </span>
-              )}
-              <div className="ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground max-sm:w-full max-sm:flex-wrap">
-                {tokenTotal.any && (
-                  <Tooltip>
-                    {/* 手机端用短标签（入/缓/出）：长标签会把这一行撑成两行，进一步压缩记录区。 */}
                     <TooltipTrigger asChild>
-                      <span className="inline-flex min-w-0 items-center">
-                        <TokenMetrics
-                          input={tokenTotal.i}
-                          cache={tokenTotal.cr}
-                          output={tokenTotal.o}
-                          labels="short"
-                          className="sm:hidden"
-                        />
-                        <TokenMetrics
-                          input={tokenTotal.i}
-                          cache={tokenTotal.cr}
-                          output={tokenTotal.o}
-                          labels="long"
-                          className="max-sm:hidden"
-                        />
-                      </span>
+                      <Badge
+                        variant="outline"
+                        className="max-w-28 shrink-0 font-normal"
+                        aria-label={
+                          activeResolution.available ? `当前配置：${resolutionLabel(activeResolution)}` : "模型不可用"
+                        }
+                      >
+                        <span className="truncate">
+                          {activeResolution.available ? resolutionLabel(activeResolution) : "模型不可用"}
+                        </span>
+                      </Badge>
                     </TooltipTrigger>
-                    <TooltipContent>
-                      输入 {activeTokens.input_tokens.toLocaleString()} · 输出{" "}
-                      {activeTokens.output_tokens.toLocaleString()} · 缓存读取{" "}
-                      {activeTokens.cache_read_tokens.toLocaleString()} · 缓存写入{" "}
-                      {activeTokens.cache_write_tokens.toLocaleString()}
+                    <TooltipContent side="bottom" className="max-w-xs [overflow-wrap:anywhere]">
+                      {activeResolution.available
+                        ? [resolutionLabel(activeResolution), activeResolution.model].filter(Boolean).join(" / ")
+                        : activeResolution.reason || "没有可用的 LLM 配置"}
                     </TooltipContent>
                   </Tooltip>
                 )}
-                {runDuration != null && (
-                  <span className="inline-flex items-center gap-1" title="运行时长（首步 → 末步）">
-                    <ClockIcon className="size-3" />
-                    {fmtDuration(runDuration)}
+                {activeAssets && activeAssets.length > 0 && <WorkerAssetBadge assets={activeAssets} />}
+                {active.inherited && active.source_task_id && (
+                  <Badge variant="outline">来源任务 #{active.source_task_id} · 只读历史</Badge>
+                )}
+                {active.live && (
+                  <span className="inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
+                    <span className="size-1 animate-pulse rounded-full bg-blue-500" />
+                    实时
                   </span>
                 )}
-                {isMain && <span>可交互</span>}
-              </div>
-            </div>
+                {activeState?.hasMore && (
+                  <span className="text-[10px] text-muted-foreground" title="向上滚动加载更早历史">
+                    ↑ 更早历史
+                  </span>
+                )}
+                <div className="ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground max-sm:w-full max-sm:flex-wrap">
+                  {tokenTotal.any && (
+                    <Tooltip>
+                      {/* 手机端用短标签（入/缓/出）：长标签会把这一行撑成两行，进一步压缩记录区。 */}
+                      <TooltipTrigger asChild>
+                        <span className="inline-flex min-w-0 items-center">
+                          <TokenMetrics
+                            input={tokenTotal.i}
+                            cache={tokenTotal.cr}
+                            output={tokenTotal.o}
+                            labels="short"
+                            className="sm:hidden"
+                          />
+                          <TokenMetrics
+                            input={tokenTotal.i}
+                            cache={tokenTotal.cr}
+                            output={tokenTotal.o}
+                            labels="long"
+                            className="max-sm:hidden"
+                          />
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        输入 {activeTokens.input_tokens.toLocaleString()} · 输出{" "}
+                        {activeTokens.output_tokens.toLocaleString()} · 缓存读取{" "}
+                        {activeTokens.cache_read_tokens.toLocaleString()} · 缓存写入{" "}
+                        {activeTokens.cache_write_tokens.toLocaleString()}
+                      </TooltipContent>
+                    </Tooltip>
+                  )}
+                  {runDuration != null && (
+                    <span className="inline-flex items-center gap-1" title="运行时长（首步 → 末步）">
+                      <ClockIcon className="size-3" />
+                      {fmtDuration(runDuration)}
+                    </span>
+                  )}
+                  {isMain && <span>可交互</span>}
+                </div>
+              </>
+            }
+          >
             {(() => {
               const dm = active.role === "worker" ? sessionMeta.get(active.id) : undefined;
               if (!dm?.deleted) return null;
@@ -2334,7 +2065,7 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
                 />
               </div>
             )}
-          </div>
+          </TaskSessionPanel>
         </SideQuestionWorkspace>
         <AlertDialog
           open={cancelIntent !== null}
@@ -2433,7 +2164,7 @@ export function SessionsTab({ taskId, taskKind = "pentest" }: { taskId: string; 
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
-      </div>
+      </TaskSessionLayout>
     </TooltipProvider>
   );
 }

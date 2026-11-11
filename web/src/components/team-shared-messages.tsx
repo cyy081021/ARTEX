@@ -1,33 +1,46 @@
 "use client";
 
 import * as React from "react";
-import { ArrowUpIcon, Loader2Icon, RotateCwIcon } from "lucide-react";
-
+import { ArrowUpIcon, ClockIcon, Loader2Icon, RotateCwIcon, WifiOffIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
-import { api } from "@/lib/api";
-import { reconcileTeamSession, teamSessionStateLabel, teamSessionWorkerLabel, visibleTeamSessions, type TeamSessionFilter } from "@/lib/team-session-display";
-import type { TeamSession, TeamSessionMessage } from "@/lib/types";
+import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { TeamMessageTranscript } from "@/components/team-message-transcript";
+import { SessionSidebar, TaskSessionLayout, TaskSessionPanel, TokenMetrics } from "@/components/task-session-layout";
+import { api, createAPI, http } from "@/lib/api";
+import type {
+  Session,
+  SessionStatus,
+  SessionTokenUsage,
+  TaskLLMResolution,
+  TaskLLMResolutions,
+  TeamSession,
+  TeamSessionMessage,
+  TokenTotal,
+} from "@/lib/types";
 
 const PAGE_SIZE = 100;
 
-function senderLabel(message: TeamSessionMessage, sessionID: string) {
-  if (message.kind === "user") {
-    if (message.member_id === 0) {
-      if (sessionID.startsWith("main:")) return "主 Agent";
-      if (sessionID === "plan") return "Planner";
-      return "本机用户";
-    }
-    return `成员 #${message.member_id}`;
-  }
-  return message.executor_id === 0 ? "本机执行端" : `设备 #${message.executor_id}`;
-}
-
-function guidanceStatusLabel(status: TeamSessionMessage["guidance_status"]) {
-  if (status === "pending") return "待交付";
-  if (status === "delivered") return "已交付执行边界";
-  return status === "closed" ? "本轮结束，未交付" : "";
+function nativeSession(item: TeamSession): Session {
+  const worker = item.id.startsWith("intent:");
+  const states: Record<string, SessionStatus> = {
+    open: "pending",
+    idle: "done",
+    readonly: "done",
+    failed: "blocked",
+    cancelled: "stopped",
+  };
+  return {
+    id: item.id,
+    title: item.title,
+    role: worker ? "worker" : item.id === "plan" ? "planner" : item.id === "system" ? "system" : "mainagent",
+    status: states[item.state] ?? (item.state as SessionStatus),
+    live: item.state === "running",
+    last_activity: "",
+    ...(worker ? { intent_id: item.id.slice(7) } : {}),
+  };
 }
 
 function mergeMessages(current: TeamSessionMessage[], incoming: TeamSessionMessage[]) {
@@ -40,93 +53,189 @@ function newRequestID() {
   return globalThis.crypto?.randomUUID?.() ?? `team-message-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-export function TeamSessionWorkspace({ team, taskId }: { team: string; taskId: string }) {
+// Extra execution branches use the same compact worker rows and transcript pane.
+export function TeamSessionWorkspace({
+  team,
+  taskId,
+  extraSessions = [],
+  extraMetadata = {},
+  renderExtra,
+  onSelectExtra,
+}: {
+  team: string;
+  taskId: string;
+  extraSessions?: Session[];
+  extraMetadata?: Record<string, { executorBadge?: string; displayTitle?: string }>;
+  renderExtra?: (id: string) => React.ReactNode;
+  onSelectExtra?: (id: string) => void;
+}) {
   const [sessions, setSessions] = React.useState<TeamSession[]>([]);
   const [canSteer, setCanSteer] = React.useState(false);
   const [sessionID, setSessionID] = React.useState("");
-  const [filter, setFilter] = React.useState<TeamSessionFilter>("all");
-  const filterRef = React.useRef<TeamSessionFilter>("all");
-  const sessionIDRef = React.useRef("");
+  const [listOpen, setListOpen] = React.useState(false);
   const [error, setError] = React.useState("");
-  const scopeRef = React.useRef(0);
-
+  const [messageError, setMessageError] = React.useState("");
+  const [lastSynced, setLastSynced] = React.useState(0);
+  const [retry, refresh] = React.useReducer((n: number) => n + 1, 0);
+  const [tokens, setTokens] = React.useState<{ total: TokenTotal; sessions: SessionTokenUsage[] } | null>(null);
+  const [resolutions, setResolutions] = React.useState<TaskLLMResolutions | null>(null);
+  const [taskKind, setTaskKind] = React.useState("");
+  const nativeAPI = React.useMemo(
+    () =>
+      createAPI(<T,>(path: string) =>
+        http<T>(
+          `/teams/${encodeURIComponent(team)}/tasks/${encodeURIComponent(taskId)}/native?${new URLSearchParams({ path })}`,
+        ),
+      ),
+    [team, taskId],
+  );
   React.useEffect(() => {
-    const scope = ++scopeRef.current;
     let alive = true;
     let timer: ReturnType<typeof setTimeout>;
     const load = async () => {
       try {
         const result = await api.teamSessions(team, taskId);
-        if (!alive || scope !== scopeRef.current) return;
+        if (!alive) return;
         setSessions(result.sessions ?? []);
         setCanSteer(result.canSteer);
-        const nextID = reconcileTeamSession(sessionIDRef.current, result.sessions ?? [], result.canSteer, filterRef.current);
-        sessionIDRef.current = nextID;
-        setSessionID(nextID);
+        setLastSynced(Date.now());
         setError("");
       } catch (e) {
-        if (alive && scope === scopeRef.current) {
-          setError((e as Error).message);
-          setCanSteer(false);
-          const status = (e as { status?: number }).status;
-          if (status === 401 || status === 403 || status === 404) { setSessions([]); sessionIDRef.current = ""; setSessionID(""); }
+        if (!alive) return;
+        setError((e as Error).message);
+        setCanSteer(false);
+        if ([401, 403, 404].includes((e as { status: number }).status)) {
+          setSessions([]);
+          setSessionID("");
+          setTokens(null);
+          setResolutions(null);
         }
       } finally {
-        if (alive && scope === scopeRef.current) timer = setTimeout(load, 5000);
+        if (alive) timer = setTimeout(load, 5000);
       }
     };
-    setSessions([]);
-    setCanSteer(false);
-    sessionIDRef.current = "";
-    setSessionID("");
-    filterRef.current = "all";
-    setFilter("all");
     void load();
     return () => {
       alive = false;
       clearTimeout(timer);
     };
-  }, [team, taskId]);
-
-  const filteredSessions = visibleTeamSessions(sessions, canSteer, filter);
-  const session = sessions.find((item) => item.id === sessionID);
-  const currentIsFiltered = !!session && !filteredSessions.some((item) => item.id === session.id);
-  const chooseFilter = (value: TeamSessionFilter) => {
-    filterRef.current = value;
-    setFilter(value);
-    if (!session || !visibleTeamSessions(sessions, canSteer, value).some((item) => item.id === session.id)) {
-      const nextID = reconcileTeamSession("", sessions, canSteer, value);
-      sessionIDRef.current = nextID;
-      setSessionID(nextID);
-    }
-  };
+  }, [team, taskId, retry]);
+  React.useEffect(() => {
+    setSessions([]);
+    setTokens(null);
+    setResolutions(null);
+    setSessionID("");
+    setLastSynced(0);
+    setMessageError("");
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const load = async () => {
+      const results = await Promise.allSettled([
+        nativeAPI.tokenStats(taskId),
+        nativeAPI.taskLLMResolution(taskId),
+        nativeAPI.task(taskId),
+      ]);
+      if (!alive) return;
+      if (results[0].status === "fulfilled") setTokens(results[0].value);
+      else setTokens(null);
+      if (results[1].status === "fulfilled") setResolutions(results[1].value);
+      else setResolutions(null);
+      if (results[2].status === "fulfilled") setTaskKind(results[2].value.kind ?? "pentest");
+      timer = setTimeout(load, 10000);
+    };
+    void load();
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [nativeAPI, taskId]);
+  const nativeSessions = [...sessions.map(nativeSession), ...extraSessions];
+  const activeID = nativeSessions.some((item) => item.id === sessionID) ? sessionID : (nativeSessions[0]?.id ?? "");
+  const session = sessions.find((item) => item.id === activeID);
+  const active = nativeSessions.find((item) => item.id === activeID);
+  const metadata = Object.fromEntries(
+    sessions.map((item) => [
+      item.id,
+      {
+        executorBadge: item.id.startsWith("intent:")
+          ? item.executor_id === 0
+            ? "本机"
+            : `设备 #${item.executor_id}`
+          : undefined,
+      },
+    ]),
+  );
+  const resolution =
+    !session || session.id === "system"
+      ? undefined
+      : session.id.startsWith("main:")
+        ? taskKind === "reverse"
+          ? resolutions?.reverse_main
+          : resolutions?.mainagent
+        : session.id === "plan"
+          ? taskKind === "reverse"
+            ? resolutions?.reverse_planner
+            : resolutions?.planner
+          : taskKind === "reverse"
+            ? undefined
+            : resolutions?.worker;
+  const healthy = lastSynced > 0 && !error && !messageError;
   return (
-    <section className="space-y-3 rounded-md border p-3" aria-label="共享会话消息">
-      {error && (
-        <p role="alert" className="text-xs text-destructive">
-          会话列表读取失败：{error}
-        </p>
-      )}
-      {!canSteer && <p className="text-xs text-muted-foreground">{error ? "会话状态未能更新，暂时停用发送；连接恢复后会重新核对权限。" : "发送引导需要此任务的执行权限；当前账号可查看共享消息。"}</p>}
-      <div className="grid min-h-80 gap-3 md:grid-cols-[minmax(14rem,0.32fr)_minmax(0,1fr)]">
-        <aside className="space-y-2 rounded-md bg-muted/30 p-2" aria-label="会话列表">
-          <h3 className="px-2 text-sm font-medium">共享会话</h3>
-          <div className="flex flex-wrap gap-1" role="group" aria-label="筛选共享会话">
-            <Button type="button" size="sm" variant={filter === "all" ? "secondary" : "ghost"} aria-pressed={filter === "all"} className="min-h-9" onClick={() => chooseFilter("all")}>全部</Button>
-            <Button type="button" size="sm" variant={filter === "sendable" ? "secondary" : "ghost"} aria-pressed={filter === "sendable"} className="min-h-9" onClick={() => chooseFilter("sendable")}>可发送</Button>
-            <Button type="button" size="sm" variant={filter === "readonly" ? "secondary" : "ghost"} aria-pressed={filter === "readonly"} className="min-h-9" onClick={() => chooseFilter("readonly")}>只读</Button>
-          </div>
-          <div className="max-h-[32rem] space-y-1 overflow-y-auto">
-            {currentIsFiltered && session && <button type="button" className="w-full rounded-md border bg-background p-2 text-left text-sm" onClick={() => { sessionIDRef.current = session.id; setSessionID(session.id); }}><span className="block font-medium">{teamSessionWorkerLabel(session.id)}</span><span className="block truncate text-xs text-muted-foreground">当前会话（不符合筛选）</span></button>}
-            {filteredSessions.map((item) => <button key={item.id} type="button" aria-current={item.id === sessionID ? "true" : undefined} className={`w-full rounded-md border p-2 text-left text-sm ${item.id === sessionID ? "bg-background shadow-sm" : "border-transparent hover:bg-background/70"}`} onClick={() => { sessionIDRef.current = item.id; setSessionID(item.id); }}><span className="block font-medium">{teamSessionWorkerLabel(item.id)} · {teamSessionStateLabel(item.state)}</span><span className="block truncate text-xs text-muted-foreground">{item.title || item.id} · {canSteer && item.can_message ? "可发送" : "只读"}</span><span className="block text-xs text-muted-foreground">执行端：{item.executor_id === 0 ? "本机" : `${item.executor_name || "设备"} #${item.executor_id}`}</span></button>)}
-            {!filteredSessions.length && !currentIsFiltered && <p className="px-2 py-3 text-xs text-muted-foreground">暂无符合条件的会话。</p>}
-          </div>
-        </aside>
-        <div className="min-w-0 rounded-md border p-3">
-          {session ? <TeamSessionMessages team={team} taskId={taskId} session={session} canSteer={canSteer} /> : <p className="text-sm text-muted-foreground">当前任务还没有可查看的共享会话。</p>}
-        </div>
-      </div>
-    </section>
+    <TooltipProvider delayDuration={300}>
+      <TaskSessionLayout listOpen={listOpen} onListOpenChange={setListOpen}>
+        <SessionSidebar
+          sessions={nativeSessions}
+          activeId={activeID}
+          activeDisplayTitle={active?.title ?? ""}
+          listOpen={listOpen}
+          onListOpenChange={setListOpen}
+          taskTokens={tokens?.total}
+          metadata={{ ...metadata, ...extraMetadata }}
+          headerSlot={
+            <button
+              type="button"
+              onClick={refresh}
+              className={`inline-flex items-center gap-1 text-[10px] ${healthy ? "text-emerald-500" : "text-amber-500"}`}
+              title={error || messageError || "共享消息每 2 秒同步，会话列表每 5 秒同步；点击刷新"}
+              aria-live="polite"
+            >
+              {healthy ? (
+                <span className="size-1 animate-pulse rounded-full bg-emerald-500" />
+              ) : (
+                <WifiOffIcon className="size-3" />
+              )}
+              {healthy ? "实时" : error || messageError ? "重试中" : "连接中"}
+            </button>
+          }
+          onSelect={(item) => {
+            setSessionID(item.id);
+            setListOpen(false);
+            setMessageError("");
+            if (extraSessions.some((extra) => extra.id === item.id)) onSelectExtra?.(item.id);
+          }}
+        />
+        {session ? (
+          <TeamSessionMessages
+            key={`${team}:${taskId}:${session.id}`}
+            team={team}
+            taskId={taskId}
+            session={session}
+            canSteer={canSteer}
+            panel
+            tokens={tokens?.sessions.find((item) => item.session === session.id)}
+            resolution={resolution}
+            onSyncError={setMessageError}
+            listError={error}
+          />
+        ) : active ? (
+          renderExtra?.(active.id)
+        ) : (
+          <TaskSessionPanel header={<span className="text-sm font-medium">任务会话</span>}>
+            <p className="p-4 text-sm text-muted-foreground">{error || "当前任务还没有可查看的会话。"}</p>
+          </TaskSessionPanel>
+        )}
+      </TaskSessionLayout>
+    </TooltipProvider>
   );
 }
 
@@ -135,11 +244,21 @@ export function TeamSessionMessages({
   taskId,
   session,
   canSteer = true,
+  panel = false,
+  tokens,
+  resolution,
+  onSyncError,
+  listError,
 }: {
   team: string;
   taskId: string;
   session: TeamSession;
   canSteer?: boolean;
+  panel?: boolean;
+  tokens?: SessionTokenUsage;
+  resolution?: TaskLLMResolution;
+  onSyncError?: (error: string) => void;
+  listError?: string;
 }) {
   const [messages, setMessages] = React.useState<TeamSessionMessage[]>([]);
   const [hasMore, setHasMore] = React.useState(false);
@@ -218,8 +337,16 @@ export function TeamSessionMessages({
         }
         if (!alive || scope !== requestScope.current) return;
         setLoadError("");
+        onSyncError?.("");
       } catch (e) {
-        if (alive && scope === requestScope.current) setLoadError((e as Error).message);
+        if (alive && scope === requestScope.current) {
+          setLoadError((e as Error).message);
+          onSyncError?.((e as Error).message);
+          if ([401, 403, 404].includes((e as { status: number }).status)) {
+            setMessages([]);
+            setHasMore(false);
+          }
+        }
       } finally {
         if (alive && scope === requestScope.current) {
           setLoading(false);
@@ -233,7 +360,7 @@ export function TeamSessionMessages({
       clearTimeout(timer);
       requestScope.current += 1;
     };
-  }, [team, taskId, sessionID, streamKey]);
+  }, [team, taskId, sessionID, streamKey, onSyncError]);
 
   React.useLayoutEffect(() => {
     const element = messageScroller.current;
@@ -277,7 +404,7 @@ export function TeamSessionMessages({
 
   async function send() {
     const message = draft.trim();
-    if (!message || !canSend || sending) return;
+    if (!message || !canSend || sending || Array.from(message).length > 4000) return;
     const id = requestID || newRequestID();
     const scope = requestScope.current;
     if (!requestID) setRequestID(id);
@@ -314,96 +441,153 @@ export function TeamSessionMessages({
   }
 
   const canSend = canSteer && session.can_message;
-  const reason = !canSteer ? "当前账号没有任务执行权限，因此共享会话均为只读。" : (session.reason ?? "此会话当前不可发送引导。");
-  return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-        <span>{teamSessionWorkerLabel(session.id)} · 执行端：{session.executor_id === 0 ? "本机" : `${session.executor_name || "设备"} #${session.executor_id}`}</span>
-        <span>{teamSessionStateLabel(session.state)} · {canSend ? "可发送引导" : "只读"}</span>
-      </div>
+  const reason = !canSteer
+    ? "当前账号没有任务执行权限，因此共享会话均为只读。"
+    : (session.reason ?? "此会话当前不可发送引导。");
+  const first = messages[0]?.created_at;
+  const last = messages.at(-1)?.created_at;
+  const duration = first && last ? Math.max(0, Math.floor((Date.parse(last) - Date.parse(first)) / 60000)) : 0;
+  const header = (
+    <>
+      <span className="min-w-0 truncate text-sm font-medium">
+        {sessionID.startsWith("intent:") ? "Worker 执行会话" : session.title}
+      </span>
+      {resolution && (
+        <Badge variant="outline" className="max-w-28 shrink-0 font-normal" title={resolution.model}>
+          {resolution.available ? resolution.name || resolution.model : "模型不可用"}
+        </Badge>
+      )}
+      {sessionID.startsWith("intent:") && (
+        <Badge variant="secondary">{session.executor_id === 0 ? "本机" : `设备 #${session.executor_id}`}</Badge>
+      )}
       {hasMore && (
-        <Button type="button" variant="ghost" size="sm" disabled={loadingOlder} onClick={() => void loadOlder()}>
-          {loadingOlder ? <Loader2Icon className="animate-spin" /> : <RotateCwIcon />}
-          加载更早消息
-        </Button>
+        <button
+          type="button"
+          className="text-[10px] text-muted-foreground"
+          disabled={loadingOlder}
+          onClick={() => void loadOlder()}
+        >
+          ↑ 更早历史
+        </button>
       )}
-      <div
-        ref={messageScroller}
-        onScroll={(event) => {
-          const element = event.currentTarget;
-          followLatest.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 32;
-        }}
-        className="max-h-72 min-h-24 space-y-2 overflow-y-auto rounded-md bg-muted/30 p-2"
-        aria-live="polite"
-      >
-        {loading && !messages.length && <p className="text-xs text-muted-foreground">正在读取消息…</p>}
-        {!loading && !messages.length && <p className="text-xs text-muted-foreground">还没有共享消息。</p>}
-        {messages.map((message) => (
-          <article key={message.id} className="rounded-md border bg-background p-2 text-sm">
-            <div className="mb-1 flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
-              <span>{senderLabel(message, sessionID)}</span>
-              <time>{message.created_at ? new Date(message.created_at).toLocaleString() : ""}</time>
-              {message.guidance_status && (
-                <Badge variant="outline" className="h-4 px-1 text-[9px]">
-                  {guidanceStatusLabel(message.guidance_status)}
-                </Badge>
-              )}
-            </div>
-            <p className="whitespace-pre-wrap break-words">{message.text}</p>
-          </article>
-        ))}
+      <div className="ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-xs text-muted-foreground max-sm:w-full max-sm:flex-wrap">
+        {tokens && (
+          <>
+            <TokenMetrics
+              input={tokens.input_tokens}
+              cache={tokens.cache_read_tokens}
+              output={tokens.output_tokens}
+              labels="long"
+              className="max-sm:hidden"
+            />
+            <TokenMetrics
+              input={tokens.input_tokens}
+              cache={tokens.cache_read_tokens}
+              output={tokens.output_tokens}
+              className="sm:hidden"
+            />
+          </>
+        )}
+        {duration > 0 && (
+          <span className="inline-flex items-center gap-1" title="已加载消息的起止时长">
+            <ClockIcon className="size-3" />
+            {duration >= 60 ? `${Math.floor(duration / 60)}h${duration % 60}m` : `${duration}m`}
+          </span>
+        )}
+        <span title={canSend ? "引导会在执行边界应用" : reason}>{canSend ? "可交互" : "只读"}</span>
       </div>
-      {loadError && (
-        <p role="alert" className="text-xs text-destructive">
-          消息读取失败：{loadError}
-        </p>
-      )}
-      {sendError && (
-        <p role="alert" className="text-xs text-destructive">
-          {sendError}
+    </>
+  );
+  const body = (
+    <>
+      <ScrollArea
+        type="auto"
+        className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!"
+        ref={(root) => {
+          messageScroller.current = root?.querySelector<HTMLDivElement>('[data-slot="scroll-area-viewport"]') ?? null;
+        }}
+        onScrollCapture={(event) => {
+          const element = event.target as HTMLDivElement;
+          if (element !== messageScroller.current) return;
+          followLatest.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 32;
+          if (element.scrollTop < 40 && hasMore && !loadingOlder) void loadOlder();
+        }}
+      >
+        <div className="min-w-0 max-w-full p-4" aria-live="polite">
+          {hasMore && (
+            <Button type="button" variant="ghost" size="sm" disabled={loadingOlder} onClick={() => void loadOlder()}>
+              {loadingOlder ? <Loader2Icon className="animate-spin" /> : <RotateCwIcon />}加载更早消息
+            </Button>
+          )}
+          {loading && !messages.length && <p className="text-xs text-muted-foreground">正在读取消息…</p>}
+          {!loading && !messages.length && <p className="text-xs text-muted-foreground">还没有共享消息。</p>}
+          <TeamMessageTranscript messages={messages} />
+        </div>
+      </ScrollArea>
+      {(listError || loadError || sendError) && (
+        <p role="alert" className="px-4 py-2 text-xs text-destructive">
+          {listError || loadError || sendError}
         </p>
       )}
       {notice && (
-        <p role="status" className="text-xs text-muted-foreground">
+        <p role="status" className="px-4 py-2 text-xs text-muted-foreground">
           {notice}
         </p>
       )}
-      {!canSend && <p className="text-xs text-muted-foreground">{reason}</p>}
-      <div className="flex items-end gap-2">
-        <Textarea
-          aria-label="发送共享会话消息"
-          placeholder={canSend ? "输入消息，调整执行方向…" : reason}
-          value={draft}
-          onChange={(event) => {
-            if (event.target.value !== draft) {
-              setRequestID("");
-              setSendError("");
-            }
-            setDraft(event.target.value);
-            setNotice("");
-          }}
-          onKeyDown={(event) => {
-            if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-              event.preventDefault();
-              void send();
-            }
-          }}
-          disabled={!canSend || sending}
-          rows={2}
-          className="min-h-16 max-h-36 resize-y text-sm"
-        />
-        <Button
-          type="button"
-          size="icon"
-          aria-label="发送消息"
-          title="发送消息"
-          disabled={!canSend || sending || !draft.trim()}
-          onClick={() => void send()}
-        >
-          {sending ? <Loader2Icon className="animate-spin" /> : <ArrowUpIcon />}
-        </Button>
-      </div>
-      <p className="text-[10px] text-muted-foreground">Ctrl/⌘ + Enter 发送</p>
+      {canSend ? (
+        <div className="border-t p-3">
+          <InputGroup className="min-h-9 has-disabled:opacity-100">
+            <InputGroupTextarea
+              aria-label="发送共享会话消息"
+              placeholder="输入消息，调整执行方向…"
+              value={draft}
+              onChange={(event) => {
+                if (event.target.value !== draft) {
+                  setRequestID("");
+                  setSendError("");
+                }
+                setDraft(event.target.value);
+                setNotice("");
+              }}
+              onKeyDown={(event) => {
+                if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+                  event.preventDefault();
+                  void send();
+                }
+              }}
+              disabled={sending}
+              rows={1}
+              className="max-h-36 min-h-9 overflow-y-auto"
+            />
+            <InputGroupAddon align="block-end">
+              <span className="px-1 text-[10px] text-muted-foreground">
+                {Array.from(draft).length}/4000 · Ctrl/⌘ + Enter
+              </span>
+              <InputGroupButton
+                className="ml-auto"
+                size="icon-xs"
+                variant="default"
+                aria-label="发送消息"
+                title="发送消息"
+                disabled={sending || !draft.trim() || Array.from(draft).length > 4000}
+                onClick={() => void send()}
+              >
+                {sending ? <Loader2Icon className="animate-spin" /> : <ArrowUpIcon />}
+              </InputGroupButton>
+            </InputGroupAddon>
+          </InputGroup>
+        </div>
+      ) : (
+        <div className="border-t px-4 py-2 text-xs text-muted-foreground">{reason}</div>
+      )}
+    </>
+  );
+  return panel ? (
+    <TaskSessionPanel header={header}>{body}</TaskSessionPanel>
+  ) : (
+    <div className="flex h-[32rem] min-w-0 flex-col">
+      {header}
+      {body}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -26,6 +28,56 @@ func TestTeamTaskNativeBrowserPreview(t *testing.T) {
 		t.Fatal("isolated preview database required")
 	}
 	f := newTeamContentFixture(t)
+	ctx := context.Background()
+	operator, err := f.s.m.pg.CreateTeamMember(ctx, f.team, "session-operator", "unused")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, permission := range []string{"read", "execute"} {
+		if err = f.s.m.pg.AttachTeamTask(ctx, f.team, mustTaskID(t, f.task.ID), operator.ID, permission); err != nil {
+			t.Fatal(err)
+		}
+	}
+	operatorToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{Subject: fmt.Sprintf("team:%d:%d", f.team, operator.ID), ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}).SignedString(f.s.jwtKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.s.m.pg.SetStatus(mustTaskID(t, f.task.ID), "running"); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.s.m.pg.SetPaused(mustTaskID(t, f.task.ID), false); err != nil {
+		t.Fatal(err)
+	}
+	f.task.updateLifecycle(func(v *taskLifecycleState) { v.Status = "running"; v.Paused = false })
+	iid, err := f.task.Store.AddWorkIntent(ctx, "隔离 Worker · 消息引导验收", 1, nil, nil, db.WorkContract{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.task.Store.SetNodeState(iid, "running"); err != nil {
+		t.Fatal(err)
+	}
+	control := agent.NewLiveControl(nil)
+	f.s.engine.workMu.Lock()
+	f.s.engine.work[iid] = &workExecution{control: control}
+	f.s.engine.workMu.Unlock()
+	t.Cleanup(func() { control.Close() })
+	appendMessage := func(a db.Activity) {
+		t.Helper()
+		if _, err := f.task.Store.AppendActivity(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	markdown := "## 本轮核对\n\n**格式与原会话一致**，保留 `evidence_version`。\n\n- 第一项：标题、加粗与列表\n- 第二项：代码块和表格\n\n```json\n{\"status\": \"verified\", \"source\": \"fixture\"}\n```\n\n| 项目 | 结果 |\n| --- | --- |\n| Markdown | 已渲染 |\n| 成员会话 | 使用原组件 |\n\n> 所有内容均为隔离环境中的合成测试材料。"
+	for _, worker := range []string{"mainagent", "planner"} {
+		for i := 0; i < 105; i++ {
+			appendMessage(db.Activity{Worker: worker, Kind: "text", Summary: fmt.Sprintf("合成历史消息 %03d", i), Detail: fmt.Sprintf("合成历史消息 %03d", i)})
+		}
+		appendMessage(db.Activity{Worker: worker, Kind: "user", Summary: "请核对本轮结果。", Detail: "请核对本轮结果。"})
+		input, cache, output := 23000, 18000, 1400
+		appendMessage(db.Activity{Worker: worker, Kind: "result", Summary: markdown, Detail: markdown, InputTokens: &input, CacheReadTokens: &cache, OutputTokens: &output})
+	}
+	appendMessage(db.Activity{Worker: "system", Kind: "llm_failover", Summary: "合成系统审计：模型切换完成。", Detail: "PRIVATE_FIXTURE_DETAIL"})
+	appendMessage(db.Activity{NodeID: &iid, Worker: "fixture", Kind: "result", Summary: markdown, Detail: markdown})
 	rootNode, err := f.task.Store.AddNode(db.KindGoal, map[string]any{"text": "合成服务验证与独立复核"}, 1, "open", "fixture", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -35,6 +87,7 @@ func TestTeamTaskNativeBrowserPreview(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
+		appendMessage(db.Activity{NodeID: &intent, Worker: "fixture", Kind: "result", Summary: markdown, Detail: markdown})
 		if e = f.task.Store.Link(rootNode, "spawns", intent); e != nil {
 			t.Fatal(e)
 		}
@@ -64,6 +117,10 @@ func TestTeamTaskNativeBrowserPreview(t *testing.T) {
 			raw, _ := json.Marshal(token)
 			fmt.Fprintf(w, `<!doctype html><script>localStorage.setItem("artex_token",%s);location.href=%q</script>`, raw, destination)
 		})
+		app.HandleFunc("GET /fixture/operator", func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := json.Marshal(operatorToken)
+			fmt.Fprintf(w, `<!doctype html><script>localStorage.setItem("artex_token",%s);location.href=%q</script>`, raw, fmt.Sprintf("/function/team/task/?team=%d&id=%s&tab=sessions", f.team, f.task.ID))
+		})
 		listener, e := net.Listen("tcp", address)
 		if e != nil {
 			t.Fatal(e)
@@ -72,9 +129,9 @@ func TestTeamTaskNativeBrowserPreview(t *testing.T) {
 		t.Cleanup(func() { _ = server.Close() })
 		go func() { _ = server.Serve(listener) }()
 	}
-	serve("127.0.0.1:8896", f.token, fmt.Sprintf("/function/team/task/?team=%d&id=%s&tab=graph", f.team, f.task.ID), f.s.TeamHandler())
+	serve("127.0.0.1:8896", f.token, fmt.Sprintf("/function/team/task/?team=%d&id=%s&tab=sessions", f.team, f.task.ID), f.s.TeamHandler())
 	serve("127.0.0.1:8897", ownerToken, "/function/tasks/detail/?id="+f.task.ID, f.s.Handler())
-	meta, _ := json.Marshal(map[string]any{"url": "http://localhost:8896/fixture", "owner_url": "http://localhost:8897/fixture", "team": f.team, "task": f.task.ID, "reverse": f.other.ID, "finding": f.finding, "member": f.member})
+	meta, _ := json.Marshal(map[string]any{"url": "http://localhost:8896/fixture", "operator_url": "http://localhost:8896/fixture/operator", "owner_url": "http://localhost:8897/fixture", "team": f.team, "task": f.task.ID, "reverse": f.other.ID, "finding": f.finding, "member": f.member})
 	if err = os.WriteFile(filepath.Join(output, "preview.json"), meta, 0600); err != nil {
 		t.Fatal(err)
 	}

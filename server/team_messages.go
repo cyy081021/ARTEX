@@ -48,8 +48,10 @@ func (s *Server) sharedSessions(ctx context.Context, t *db.Task, team int64, ste
 		items = append(items, teamSession{ID: fmt.Sprintf("main:%d", v.Seq), Title: fmt.Sprintf("主 Agent · 会话 #%d", v.Seq+1), ExecutorName: "本机", TeamID: team, State: state,
 			Reason: "主 Agent 的共享会话仅供查看；请在主端的任务详情页打开主 Agent 会话发送消息"})
 	}
-	items = append(items, teamSession{ID: "plan", Title: "规划 Planner", ExecutorName: "本机", TeamID: team, State: "readonly",
+	items = append(items, teamSession{ID: "plan", Title: "规划 Planner · 态势研判", ExecutorName: "本机", TeamID: team, State: "readonly",
 		Reason: "Planner 是自动规划记录，不直接接收对话；请通过主 Agent 调整任务目标，或向运行中的 Worker 发送引导"})
+	items = append(items, teamSession{ID: "system", Title: "系统事件 · LLM 故障转移", ExecutorName: "本机", TeamID: team, State: "readonly",
+		Reason: "系统事件仅供查看"})
 	// Latest assignment identifies historical executor too, until this intent is
 	// actually reclaimed locally. Pagination of messages is independent of tools.
 	rows, err := s.m.pg.QueryContext(ctx, `SELECT n.id,COALESCE(n.payload->>'title',n.payload->>'summary',n.payload->>'text',n.payload->>'task',n.payload->>'description','Work'),n.state,
@@ -154,7 +156,7 @@ func (s *Server) teamMessages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	f, valid := parseActivitySession(r.URL.Query().Get("session"))
+	f, valid := parseTeamActivitySession(r.URL.Query().Get("session"))
 	if !valid {
 		writeErr(w, 400, "会话编号无效")
 		return
@@ -195,6 +197,13 @@ func (s *Server) teamMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"items": items, "has_more": more})
+}
+
+func parseTeamActivitySession(sess string) (db.ActivitySessionFilter, bool) {
+	if sess == "system" {
+		return db.ActivitySessionFilter{Worker: "system"}, true
+	}
+	return parseActivitySession(sess)
 }
 
 func (s *Server) teamSendMessage(w http.ResponseWriter, r *http.Request) {

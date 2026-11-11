@@ -66,6 +66,7 @@ func TestTeamTaskNativeScopeAndShapes(t *testing.T) {
 		{"assets?task_id=" + f.task.ID + "&limit=5&offset=0", "assets", "本任务示例服务"},
 		{"assets/counts?task_id=" + f.task.ID, "", ""},
 		{"llm/records/by-model?task=" + f.task.ID, "models", ""},
+		{"tasks/" + f.task.ID + "/llm/resolution", "mainagent", ""},
 		{"tasks/" + f.task.ID + "/finding-relations", "nodes", ""},
 		{"tasks/" + f.task.ID + "/finding-review-status", "enabled", ""},
 		{"tasks/" + f.task.ID + "/intercept-rules", "rules", ""},
@@ -116,7 +117,13 @@ func TestTeamTaskNativeScopeAndShapes(t *testing.T) {
 	get(native(fmt.Sprintf("exploration/findings/%d/lineage", f.finding)), "GET", 200)
 	get(native(fmt.Sprintf("exploration/findings/%d/traffic", f.finding)), "GET", 200)
 	get(native("tasks/"+f.other.ID+"/coverage"), "GET", 403)
+	get(native("tasks/"+f.other.ID+"/llm/resolution"), "GET", 403)
 	get(native("exploration/graph?task="+f.other.ID), "GET", 403)
+	get(native("tasks/"+f.task.ID+"/llm/resolution?task="+f.other.ID), "GET", 403)
+	resolution := get(native("tasks/"+f.task.ID+"/llm/resolution"), "GET", 200)
+	if strings.Contains(strings.ToLower(string(resolution)), "api_key") || strings.Contains(strings.ToLower(string(resolution)), "apikey") {
+		t.Fatalf("LLM resolution exposed credentials: %s", resolution)
+	}
 	get(native("exploration/graph?task="+f.task.ID+"&task="+f.other.ID), "GET", 403)
 	get(native("exploration/graph?task_id="+f.task.ID+"&task_id="+f.other.ID), "GET", 403)
 	get(native("exploration/findings/1?context_task="+f.other.ID), "GET", 403)

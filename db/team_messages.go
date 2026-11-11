@@ -50,6 +50,13 @@ func (s *ExplorationStore) messageWindow(ctx context.Context, f ActivitySessionF
 	 FROM (SELECT * FROM activity WHERE exploration_id=$1%s AND (kind IN ('text','user') OR (kind='result' AND COALESCE(tool,'')='')) AND ($%d<=0 OR id%s$%d) ORDER BY id %s LIMIT $%d) a
 	 LEFT JOIN team_execution_messages m ON m.activity_id=a.id
 	 LEFT JOIN team_execution_assignments x ON x.id=m.assignment_id ORDER BY a.id %s`, cond, barg, compare, barg, order, barg+1, order)
+	if f.Worker == "system" {
+		// The system session is a deliberately narrow user-facing projection. In
+		// particular, never select detail or metadata from LLM audit activities.
+		q = fmt.Sprintf(`SELECT a.id,'text',COALESCE(a.summary,''),a.created_at,0,0,''
+		 FROM (SELECT * FROM activity WHERE exploration_id=$1%s AND worker='system' AND kind IN ('llm_switch','llm_failover') AND ($%d<=0 OR id%s$%d) ORDER BY id %s LIMIT $%d) a
+		 ORDER BY a.id %s`, cond, barg, compare, barg, order, barg+1, order)
+	}
 	rows, err := s.db.QueryContext(ctx, q, values...)
 	if err != nil {
 		return nil, false, err
