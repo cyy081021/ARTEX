@@ -275,6 +275,7 @@ return {
     get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
   task: (id: string) => get<Task>(`/tasks/${encodeURIComponent(id)}`),
   createTask: (input: {
+    scenario?: "web";
     kind?: TaskKind;
     name?: string;
     categoryId?: number;
@@ -294,6 +295,7 @@ return {
       name: input.name ?? "",
       kind: input.kind ?? "pentest",
       workflow_version: 1,
+      scenario: input.scenario,
       category_id: input.categoryId ?? null,
       description: input.description,
       goal: input.goal,

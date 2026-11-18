@@ -508,6 +508,14 @@ DROP TRIGGER IF EXISTS trg_task_categories_upd ON task_categories;
 CREATE TRIGGER trg_task_categories_upd BEFORE UPDATE ON task_categories
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
+-- Single-machine software review records have an independent identity and lifecycle.
+CREATE TABLE IF NOT EXISTS software_dossiers (
+    id UUID PRIMARY KEY,
+    revision BIGINT NOT NULL DEFAULT 1,
+    body JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS tasks (
     id             BIGSERIAL PRIMARY KEY,
     name           TEXT NOT NULL DEFAULT '',
@@ -571,6 +579,7 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS active_llm_profile_id BIGINT REFERENC
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS llm_chain_revision BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 -- Reverse assessment workflow identity; workflow_version is immutable after creation.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS scenario TEXT CHECK (scenario = 'web');
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'pentest' CHECK(kind IN ('pentest','reverse'));
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS workflow_version INTEGER NOT NULL DEFAULT 1 CHECK(workflow_version=1);
 CREATE OR REPLACE FUNCTION prevent_task_workflow_identity_change() RETURNS trigger LANGUAGE plpgsql AS $$

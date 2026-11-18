@@ -30,6 +30,7 @@ func rawString(raw json.RawMessage) string {
 
 // ---- Task (frontend "Task") ---- created_at as RFC3339, plus a derived status.
 type TaskDTO struct {
+	Scenario           string               `json:"scenario,omitempty"`
 	Kind               string               `json:"kind"`
 	WorkflowVersion    int                  `json:"workflow_version"`
 	PlanningDecision   *db.PlanningDecision `json:"planning_decision,omitempty"`
@@ -117,7 +118,7 @@ func taskDTO(t *Task, status string) TaskDTO {
 		planningDecision, _ = t.Store.PlanningDecision()
 	}
 	return TaskDTO{
-		Kind:               t.Kind,
+		Kind: t.Kind, Scenario: t.Scenario,
 		WorkflowVersion:    t.WorkflowVersion,
 		PlanningDecision:   planningDecision,
 		ID:                 t.ID,

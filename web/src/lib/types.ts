@@ -7,6 +7,7 @@ export type TaskRoute = { primary_kind: "pentest" | "reverse"; capabilities: ("w
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 export interface Task {
+  scenario?: "web";
   kind?: TaskKind;
   workflow_version?: number;
   planning_decision?: {kind: "waiting" | "no_progress"; reason: string; resume_when: string; recorded_at: string};
