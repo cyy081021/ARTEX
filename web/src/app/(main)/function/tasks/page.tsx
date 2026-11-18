@@ -49,6 +49,9 @@ import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
 import { TaskTemplateControls } from "@/components/task-template-controls";
+import { MOCK } from "@/lib/mock/enabled";
+import { ScenarioPicker, SoftwareCreateForm, SoftwareList } from "@/components/software-dossiers";
+import { inferScene, type SceneChoice } from "@/lib/software-dossier";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -395,6 +398,7 @@ export default function TasksPage() {
 
   // 多选删除:选择跨翻页/筛选保留,只在任务真的消失(被删或后端不再返回)时收敛。
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(() => new Set());
+  const [softwareCount, setSoftwareCount] = React.useState(0);
 
   React.useEffect(() => {
     setSelectedIds((prev) => {
@@ -908,11 +912,12 @@ export default function TasksPage() {
               />
             </div>
 
-            {tasks.length === 0 ? (
+            {!MOCK && <SoftwareList query={query} onCount={setSoftwareCount}/>}
+            {tasks.length === 0 && softwareCount === 0 ? (
               <div className="text-muted-foreground mx-4 flex items-center justify-center rounded-lg border border-dashed py-20 text-sm lg:mx-6">
                 暂无任务，点击右上角「新建任务」开始。
               </div>
-            ) : filtered.length === 0 ? (
+            ) : tasks.length === 0 ? null : filtered.length === 0 ? (
               <div className="text-muted-foreground mx-4 flex items-center justify-center rounded-lg border border-dashed py-20 text-sm lg:mx-6">
                 没有匹配的任务。
               </div>
@@ -1188,7 +1193,7 @@ const TaskRow = React.memo(function TaskRow({
       <TableCell className="font-medium">
         <div className="flex max-w-xs items-center gap-2">
           <TaskNameEditor task={task} onRename={onRename} />
-          <Badge variant="outline" className="shrink-0">{task.kind === "reverse" ? "逆向" : "渗透"}</Badge>
+          <Badge variant="outline" className="shrink-0">{task.scenario === "web" ? "Web" : task.kind === "reverse" ? "逆向" : "渗透"}</Badge>
           {task.active && <StarIcon className="size-4 shrink-0 fill-amber-400 text-amber-400" />}
           {taskIsPinned(task) && <PinIcon className="text-primary size-4 shrink-0" aria-label="已置顶" />}
         </div>
@@ -3084,6 +3089,10 @@ function CreateTaskSheet({
   const [timeoutMin, setTimeoutMin] = React.useState(""); // 任务级超时(分钟);空/0 = 不限时
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
+  const [choice, setChoice] = React.useState<SceneChoice>("auto");
+  const [object, setObject] = React.useState("");
+  const scene = MOCK ? "auto" : inferScene(choice, object);
+  const software = scene === "open_source_software" || scene === "closed_source_software";
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
   const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
   // Material bytes are uploaded after the routing decision.
@@ -3108,13 +3117,14 @@ function CreateTaskSheet({
   // Keep materials in memory until a workflow has been selected.
   function pickFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
+    if(choice==="auto" && !object.trim() && files.length===1 && inferScene("auto",files[0].name)==="closed_source_software") setObject(files[0].name);
     setSelectedFiles((previous) => [...previous, ...Array.from(files)]);
     setUploadCount((count) => count + files.length);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
   async function createTask() {
-    if (!description.trim() || !goal.trim()) {
+    if (!(description.trim() || object.trim()) || !goal.trim()) {
       toast.error("请填写描述与目标");
       return;
     }
@@ -3127,10 +3137,11 @@ function CreateTaskSheet({
       const timeoutSec = Math.max(0, Math.floor(Number(timeoutMin) || 0)) * 60;
       const heartbeatSec = Math.max(10, Math.floor(Number(heartbeatMin) || 10)) * 60; // 下限 10min，与后端归一一致
       const created = await api.createTask({
-        kind: "auto",
+        scenario: scene === "web" ? "web" : undefined,
+        kind: scene === "reverse" ? "reverse" : "auto",
         name: name.trim(),
         categoryId: categoryID,
-        description: description.trim(),
+        description: [object.trim(), description.trim()].filter(Boolean).join("\n"),
         goal: goal.trim(),
         materialHints: selectedFiles.map((f) => ({ name: f.name, size: f.size })),
         llmProfileIds: llmProfileIDs.map(Number),
@@ -3145,7 +3156,7 @@ function CreateTaskSheet({
           .filter((r) => r.pattern !== ""),
       });
       let artifactUploadError = "";
-      if (created.route?.primary_kind === "reverse") {
+      if (created.task.kind === "reverse") {
         for (const file of selectedFiles) {
           try {
             await api.uploadReverseArtifact(created.task.id, file, "user-provided", "");
@@ -3181,6 +3192,8 @@ function CreateTaskSheet({
       setTimeoutMin("");
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
+      setChoice("auto");
+      setObject("");
       setCoverageEnabled(true);
       setInterceptRules([]);
       setUploadCount(0);
@@ -3210,15 +3223,17 @@ function CreateTaskSheet({
       >
         <SheetHeader className="border-b p-6">
           <SheetTitle>新建任务</SheetTitle>
-          <SheetDescription>描述对象与需要回答的问题，AI 会结合所选材料判断合适的工作流。</SheetDescription>
+          <SheetDescription>填写对象和目的，可确认或更改识别的场景。</SheetDescription>
         </SheetHeader>
-
+        {!MOCK && <ScenarioPicker choice={choice} object={object} onChoice={setChoice} onObject={setObject}/>}
+        {software ? <SoftwareCreateForm key={scene} scene={scene} object={object} initialFiles={selectedFiles} goal={goal} setGoal={setGoal} onBusy={setCreating}
+          onDone={id=>{setOpen(false);window.location.assign("/function/tasks/software/?id="+encodeURIComponent(id));}}/> :
         <div className="flex-1 overflow-y-auto p-6">
           <div className="grid gap-5">
             <Field>
               <FieldLabel>任务类型</FieldLabel>
               <FieldDescription>
-                由 AI 根据描述、目标和材料文件名及大小判断；材料正文不会用于分类。混合任务之后仍可请求其他工作流协助。
+                {scene === "auto" ? "由 AI 根据描述、目标和材料元数据判断原有 Web 或逆向流程。" : scene === "web" ? "使用现有 Web 任务流程。" : "使用现有逆向任务流程。"}
               </FieldDescription>
             </Field>
             <TaskTemplateControls
@@ -3417,13 +3432,12 @@ function CreateTaskSheet({
               </CollapsibleContent>
             </Collapsible>
           </div>
-        </div>
-
+        </div>}
         <SheetFooter className="flex-row justify-end gap-2 border-t p-4">
           <SheetClose asChild>
             <Button variant="outline">取消</Button>
           </SheetClose>
-          <Button onClick={createTask} disabled={creating || uploading}>
+          <Button type={software ? "submit" : "button"} form={software ? "software-create" : undefined} onClick={software ? undefined : createTask} disabled={creating || uploading}>
             {creating && <Spinner data-icon="inline-start" />}
             {creating ? "创建中" : "创建"}
           </Button>

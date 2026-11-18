@@ -27,6 +27,7 @@ import (
 // sharing the process-wide asset store. ID is the PG task id as a string; ExpID
 // is the exploration the task owns.
 type Task struct {
+	Scenario        string `json:"scenario,omitempty"`
 	ID              string `json:"id"`
 	Kind            string `json:"kind"`
 	WorkflowVersion int    `json:"workflow_version"`
@@ -832,7 +833,7 @@ func unixNanoOrZero(t *time.Time) int64 {
 
 func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Interceptor) *Task {
 	return &Task{
-		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID, Kind: pt.Kind, WorkflowVersion: pt.WorkflowVersion,
+		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID, Kind: pt.Kind, Scenario: pt.Scenario, WorkflowVersion: pt.WorkflowVersion,
 		Name:       pt.Name,
 		CategoryID: cloneInt64Ptr(pt.CategoryID), CategoryName: pt.CategoryName,
 		PinnedAt:    unixOrZero(pt.PinnedAt),

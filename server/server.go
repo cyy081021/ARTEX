@@ -717,6 +717,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/tasks", s.listTasks)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
+	s.softwareDossierRoutes(mux)
 	mux.HandleFunc("GET /api/task-categories", s.pgListTaskCategories)
 	mux.HandleFunc("POST /api/task-categories", s.pgCreateTaskCategory)
 	mux.HandleFunc("PATCH /api/task-categories/{id}", s.pgRenameTaskCategory)
@@ -1491,6 +1492,8 @@ func truncateReply(s string) string {
 }
 
 type createTaskReq struct {
+	Scenario             string             `json:"scenario,omitempty"`
+	Software             *softwareCreate    `json:"software,omitempty"`
 	Kind                 string             `json:"kind,omitempty"`
 	MaterialHints        []taskMaterialHint `json:"material_hints,omitempty"`
 	Name                 string             `json:"name,omitempty"` // 可选任务名称;省略/空=未命名
@@ -1511,9 +1514,18 @@ type createTaskReq struct {
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	var req createTaskReq
+	r.Body = http.MaxBytesReader(w, r.Body, maxDossierRequest)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, "bad json: "+err.Error())
 		return
+	}
+	if req.Scenario != "" || req.Software != nil {
+		if req.Scenario == "web" && req.Software == nil && (req.Kind == "" || req.Kind == "pentest" || req.Kind == "auto") {
+			req.Kind = "auto"
+		} else {
+			s.createSoftwareDossier(w, r, req.Scenario, req.Software)
+			return
+		}
 	}
 	if len(req.LLMProfileIDs) == 0 && req.LLMProfileID != nil {
 		req.LLMProfileIDs = []int64{*req.LLMProfileID}
@@ -1545,6 +1557,10 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		result, err := classifyTask(r.Context(), prov, req.Description, req.Goal, req.MaterialHints)
 		if err != nil {
 			writeErr(w, 503, err.Error())
+			return
+		}
+		if req.Scenario == "web" && result.PrimaryKind != "pentest" {
+			writeErr(w, 400, "材料与 Web 场景不符，请确认场景或更换材料")
 			return
 		}
 		route = &result
@@ -1605,7 +1621,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
-		Kind: req.Kind,
+		Kind: req.Kind, Scenario: req.Scenario,
 		Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
