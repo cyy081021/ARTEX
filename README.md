@@ -9,13 +9,15 @@ AI 自主渗透测试与逆向分析系统（Go 后端 + Next.js 前端）
 
 📦 **源码仓库：** [cyy081021/ARTEX](https://github.com/cyy081021/ARTEX) · **ARTEX Releases：** [正式版本发布页](https://github.com/cyy081021/ARTEX/releases)
 
-当前正式版本为 **v0.7.0**。`artex-*` 标签是历史源码里程碑，不是正式下载版本；正式版本使用 `vX.Y.Z`，在线更新从本仓库 Releases 获取版本和校验文件。
+当前源码版本为 **v0.7.1**，构建产物及发布时间见 [ARTEX Releases](https://github.com/cyy081021/ARTEX/releases)。正式版本使用 `vX.Y.Z`，在线更新从本仓库 Releases 获取版本和校验文件；`artex-*` 标签保留历史源码里程碑。
 
 </div>
 
 ---
 
 ## 当前版本与配置
+
+v0.7.1 在原「任务 → 新建任务」入口加入**开源软件**和**闭源软件**审阅。支持公共 GitHub 仓库、本地源码目录或 ZIP、附带发行包、文件摘要与行号引用、已有运行证据核对、文本报告和完整归档恢复。前端复用现有表单与卡片，Web 和逆向任务的历史归档已通过恢复验收。两个软件场景当前提供材料审阅，运行证据由用户提供；自动漏洞挖掘、动态分析和 fuzzing 的接入仍待后续实现。[软件场景使用说明](docs/software-scenarios.md) · [v0.7.1 验收与兼容范围](RELEASES.md#v071)
 
 任务创建支持“渗透测试”和“逆向分析”两条流程。逆向接入 REA 6.8.0 的 JavaScript、APK/JADX、.NET 元数据与 IL、原生/Ghidra 分析，并提供 Windows、Linux、Android 的独立授权 Frida 运行时观察；材料、原始证据、独立结论复核和报告形成单独流程。安装及工作流见 [逆向任务接入](docs/逆向任务接入.md)。
 
@@ -31,6 +33,7 @@ v0.7.0 创建任务可由模型自动判断主流程，继续复用这两类任�
 
 | 标签 | 类型 | 摘要 |
 | --- | --- | --- |
+| [`v0.7.1`](RELEASES.md#v071) | 正式版本标签 | 开源与闭源软件审阅入口、源码快照与发行包识别、证据引用、报告和归档恢复，兼容原有 Web 与逆向任务 |
 | [`v0.7.0`](RELEASES.md#v070) | 正式版 | 自动任务分流、Linux x86-64 原生分析与独立重放、AFL++ 最小闭环及 GDB 结束竞态修复 |
 | [`v0.6.0`](RELEASES.md#v060) | 正式版 | 自动接入与协作派发、成员原生任务界面、Android/浏览器连续逆向交互及工作流修复 |
 | [`v0.5.0`](RELEASES.md#v050) | 正式版 | 共享主任务执行分支、团队指导与回执、跨流程协助、证据失效和独立复核 |
@@ -212,7 +215,7 @@ cd ARTEX
 ```bash
 cd ARTEX
 git pull                       # 更新 compose / 脚本（可选）
-# 指定正式版本：在 .env 设 ARTEX_TAG=v0.7.0；不设则使用 latest（当前指向最新正式版）
+# 指定正式版本：在 .env 设 ARTEX_TAG=v0.7.1；不设则使用 latest（当前指向最新正式版）
 docker compose pull artex
 docker compose up -d artex     # 换新镜像重启 → 自动迁移 schema
 docker image prune -f          # 清理旧镜像（可选）
