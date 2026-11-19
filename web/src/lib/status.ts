@@ -128,3 +128,107 @@ export type StatusDomain = keyof typeof maps;
 export function statusMeta(domain: StatusDomain, key: string): StatusMeta {
   return maps[domain][key] ?? { label: key, tone: "neutral" };
 }
+
+export type T7StatusSnapshot =
+  | { kind: "loading" | "empty" | "error" }
+  | {
+      kind: "ready";
+      campaign: {
+        state?: string | null;
+        desired_state?: string | null;
+        total_budget_ms?: number | null;
+        charged_budget_ms?: number | null;
+        remaining_budget_ms?: number | null;
+        cleanup_status?: string | null;
+      };
+      current_attempt?: { phase?: string | null; cleanup_status?: string | null; resource_hold?: boolean | null } | null;
+      // Only availability is carried into the view.
+      evidenceAvailable?: boolean | null;
+    };
+
+export const t7Example: T7StatusSnapshot = {
+  kind: "ready",
+  campaign: {
+    state: "stopping",
+    desired_state: "paused",
+    total_budget_ms: 60_000,
+    charged_budget_ms: 15_000,
+    remaining_budget_ms: 45_000,
+    cleanup_status: "pending",
+  },
+  current_attempt: { phase: "cleanup", cleanup_status: "pending", resource_hold: true },
+  evidenceAvailable: false,
+};
+
+const campaignStates = {
+  draft: "草稿",
+  queued: "排队中",
+  running: "运行中",
+  stopping: "停止中",
+  paused: "已暂停",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+  interrupted: "已中断",
+};
+
+const requestedStates = {
+  none: "无请求",
+  queued: "已请求排队",
+  running: "已请求运行",
+  paused: "已请求暂停",
+  cancelled: "已请求取消",
+};
+
+const attemptPhases = {
+  preflight: "前置检查",
+  startup: "启动中",
+  tool_probe: "工具检查",
+  instrumentation_probe: "插桩检查",
+  campaign: "运行中",
+  pause_collect: "暂停收集",
+  checkpoint_write: "写入检查点",
+  cleanup: "清理中",
+  evidence: "证据整理",
+  finalize: "收尾中",
+};
+
+const cleanupStatuses = {
+  pending: "待处理",
+  verified: "已验证",
+  not_required: "无需清理",
+  unknown: "未确认",
+  failed: "失败",
+};
+
+export function t7StatusContent(snapshot: T7StatusSnapshot): string | [string, string][] {
+  if (snapshot.kind !== "ready") {
+    return { loading: "正在读取示例状态…", empty: "暂无状态快照", error: "无法显示状态快照" }[snapshot.kind];
+  }
+
+  const missing = "未提供";
+  const label = (value: string | null | undefined, labels: Record<string, string>) => {
+    if (!value) return missing;
+    return Object.hasOwn(labels, value) ? labels[value] : "未知";
+  };
+  const budget = (value?: number | null) =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? `${value.toLocaleString("zh-CN")} ms` : missing;
+  const { campaign, current_attempt: attempt, evidenceAvailable } = snapshot;
+  const rows: [string, string][] = [
+    ["当前状态", label(campaign.state, campaignStates)],
+    ["期望状态", label(campaign.desired_state, requestedStates)],
+    ["总预算", budget(campaign.total_budget_ms)],
+    ["已计入预算", budget(campaign.charged_budget_ms)],
+    ["剩余预算", budget(campaign.remaining_budget_ms)],
+    ["清理状态", label(campaign.cleanup_status, cleanupStatuses)],
+  ];
+  if (attempt) {
+    rows.push(
+      ["当前尝试阶段", label(attempt.phase, attemptPhases)],
+      ["尝试清理状态", label(attempt.cleanup_status, cleanupStatuses)],
+      ["资源保留", attempt.resource_hold == null ? missing : attempt.resource_hold ? "已保留" : "未保留"],
+    );
+  }
+  rows.push(["证据", evidenceAvailable == null ? missing : evidenceAvailable ? "可用" : "暂无"]);
+  return rows;
+}

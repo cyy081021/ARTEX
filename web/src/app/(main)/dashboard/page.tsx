@@ -22,6 +22,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { type ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { Progress } from "@/components/ui/progress";
 import { api } from "@/lib/api";
+import { MOCK } from "@/lib/mock/enabled";
+import { type T7StatusSnapshot, t7Example, t7StatusContent } from "@/lib/status";
 import type {
   Activity,
   Agent,
@@ -128,6 +130,33 @@ function SectionTitle({
 }
 
 // ── page ─────────────────────────────────────────────────────────────────────
+
+function T7StatusCard({ snapshot }: { snapshot: T7StatusSnapshot }) {
+  const content = t7StatusContent(snapshot);
+  return (
+    <Card className="min-w-0" size="sm">
+      <CardContent>
+        <details open>
+          <summary className="cursor-pointer rounded-sm text-sm font-medium focus-visible:outline-2 focus-visible:outline-ring">
+            <h2 className="inline">T7 状态快照 <span className="text-xs font-normal text-muted-foreground">（离线示例）</span></h2>
+          </summary>
+          {typeof content === "string" ? (
+            <p role="status" className="mt-3 text-sm text-muted-foreground">{content}</p>
+          ) : (
+            <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-3">
+              {content.map(([label, value]) => (
+                <div key={label} className="min-w-0">
+                  <dt className="text-xs text-muted-foreground">{label}</dt>
+                  <dd className="break-words text-sm font-medium tabular-nums">{value}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
+        </details>
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function DashboardPage() {
   // data state
@@ -500,6 +529,8 @@ export default function DashboardPage() {
           <p className="text-xs text-muted-foreground">系统全局状态 · 实时刷新</p>
         </div>
       </div>
+
+      {MOCK && <T7StatusCard snapshot={t7Example} />}
 
       {/* ── Row 1: 5 stat cards ── */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
