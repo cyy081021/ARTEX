@@ -130,7 +130,7 @@ export function statusMeta(domain: StatusDomain, key: string): StatusMeta {
 }
 
 export type T7StatusSnapshot =
-  | { kind: "loading" | "empty" | "error" }
+  | { kind: "loading" | "empty" | "error" | "unauthenticated" | "forbidden" | "unavailable" }
   | {
       kind: "ready";
       campaign: {
@@ -145,20 +145,6 @@ export type T7StatusSnapshot =
       // Only availability is carried into the view.
       evidenceAvailable?: boolean | null;
     };
-
-export const t7Example: T7StatusSnapshot = {
-  kind: "ready",
-  campaign: {
-    state: "stopping",
-    desired_state: "paused",
-    total_budget_ms: 60_000,
-    charged_budget_ms: 15_000,
-    remaining_budget_ms: 45_000,
-    cleanup_status: "pending",
-  },
-  current_attempt: { phase: "cleanup", cleanup_status: "pending", resource_hold: true },
-  evidenceAvailable: false,
-};
 
 const campaignStates = {
   draft: "草稿",
@@ -201,9 +187,78 @@ const cleanupStatuses = {
   failed: "失败",
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function statusKey(value: unknown, labels: Record<string, string>) {
+  if (typeof value !== "string" || !value) return undefined;
+  return Object.hasOwn(labels, value) ? value : "unrecognized";
+}
+
+function isBudget(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+// Projects a detail response into display fields. The caller supplies the response.
+export function t7StatusFromDetail(status: number | "loading", body?: unknown): T7StatusSnapshot {
+  switch (status) {
+    case "loading": return { kind: "loading" };
+    case 401: return { kind: "unauthenticated" };
+    case 403: return { kind: "forbidden" };
+    case 404: return { kind: "empty" };
+    case 409: return { kind: "unavailable" };
+    case 200: break;
+    default: return { kind: "error" };
+  }
+
+  if (!isRecord(body) || !isRecord(body.campaign)) return { kind: "error" };
+  const { campaign, current_attempt: attempt, latest_evidence: evidence } = body;
+  if (attempt != null && !isRecord(attempt)) return { kind: "error" };
+
+  return {
+    kind: "ready",
+    campaign: {
+      state: statusKey(campaign.state, campaignStates),
+      desired_state: statusKey(campaign.desired_state, requestedStates),
+      cleanup_status: statusKey(campaign.cleanup_status, cleanupStatuses),
+      total_budget_ms: isBudget(campaign.total_budget_ms) ? campaign.total_budget_ms : undefined,
+      charged_budget_ms: isBudget(campaign.charged_budget_ms) ? campaign.charged_budget_ms : undefined,
+      remaining_budget_ms: isBudget(campaign.remaining_budget_ms) ? campaign.remaining_budget_ms : undefined,
+    },
+    current_attempt: attempt == null ? undefined : {
+      phase: statusKey(attempt.phase, attemptPhases),
+      cleanup_status: statusKey(attempt.cleanup_status, cleanupStatuses),
+      resource_hold: typeof attempt.resource_hold === "boolean" ? attempt.resource_hold : undefined,
+    },
+    evidenceAvailable: evidence === null ? false :
+      isRecord(evidence) && evidence.authority === "candidate-only" ? true : undefined,
+  };
+}
+
+export const t7Example = t7StatusFromDetail(200, {
+  campaign: {
+    state: "stopping",
+    desired_state: "paused",
+    total_budget_ms: 60_000,
+    charged_budget_ms: 15_000,
+    remaining_budget_ms: 45_000,
+    cleanup_status: "pending",
+  },
+  current_attempt: { phase: "cleanup", cleanup_status: "pending", resource_hold: true },
+  latest_evidence: null,
+});
+
 export function t7StatusContent(snapshot: T7StatusSnapshot): string | [string, string][] {
   if (snapshot.kind !== "ready") {
-    return { loading: "正在读取示例状态…", empty: "暂无状态快照", error: "无法显示状态快照" }[snapshot.kind];
+    return {
+      loading: "正在读取示例状态…",
+      empty: "暂无状态快照",
+      error: "无法显示状态快照",
+      unauthenticated: "请先登录以查看状态",
+      forbidden: "无权查看状态",
+      unavailable: "状态暂不可用",
+    }[snapshot.kind];
   }
 
   const missing = "未提供";
@@ -212,7 +267,7 @@ export function t7StatusContent(snapshot: T7StatusSnapshot): string | [string, s
     return Object.hasOwn(labels, value) ? labels[value] : "未知";
   };
   const budget = (value?: number | null) =>
-    typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? `${value.toLocaleString("zh-CN")} ms` : missing;
+    isBudget(value) ? `${value.toLocaleString("zh-CN")} ms` : missing;
   const { campaign, current_attempt: attempt, evidenceAvailable } = snapshot;
   const rows: [string, string][] = [
     ["当前状态", label(campaign.state, campaignStates)],
