@@ -24,6 +24,7 @@ import { type ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } f
 import { Progress } from "@/components/ui/progress";
 import { api } from "@/lib/api";
 import { MOCK } from "@/lib/mock/enabled";
+import { applyOfflineSnapshot, selectOfflineRecord } from "@/lib/readonly-status-view";
 import { t7Example } from "@/lib/status";
 import type {
   Activity,
@@ -132,10 +133,11 @@ function SectionTitle({
 
 // ── page ─────────────────────────────────────────────────────────────────────
 
-const softwareReviewExample = [
+const exampleSelection = selectOfflineRecord("dashboard-example", true);
+const offlineExample = applyOfflineSnapshot(exampleSelection, exampleSelection.pending, t7Example, [
   { reason: "示例材料已登记版本，提交复核。" },
   { reason: "复核记录与同一版本的示例材料一致。" },
-];
+]);
 
 export default function DashboardPage() {
   // data state
@@ -511,8 +513,8 @@ export default function DashboardPage() {
 
       {MOCK && (
         <>
-          <T7StatusCard snapshot={t7Example} />
-          <SoftwareReviewHistory history={softwareReviewExample} />
+          <T7StatusCard snapshot={offlineExample.snapshot} />
+          <SoftwareReviewHistory history={offlineExample.history} />
         </>
       )}
 

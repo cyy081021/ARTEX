@@ -130,7 +130,7 @@ export function statusMeta(domain: StatusDomain, key: string): StatusMeta {
 }
 
 export type T7StatusSnapshot =
-  | { kind: "loading" | "empty" | "error" | "unauthenticated" | "forbidden" | "unavailable" }
+  | { kind: "loading" | "unselected" | "empty" | "error" | "unauthenticated" | "forbidden" | "unavailable" }
   | {
       kind: "ready";
       campaign: {
@@ -253,6 +253,7 @@ export function t7StatusContent(snapshot: T7StatusSnapshot): string | [string, s
   if (snapshot.kind !== "ready") {
     return {
       loading: "正在读取示例状态…",
+      unselected: "尚未选择记录",
       empty: "暂无状态快照",
       error: "无法显示状态快照",
       unauthenticated: "请先登录以查看状态",
