@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-v7m7PpVcVwlgMvf0ioxuKcG6mOU3R1K0dE6ck4mKChA='; style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>源码审阅查看器</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #f3f5f4; --paper: #fff; --ink: #202e2a; --muted: #496158; --line: #b7c7bf; --accent: #18563d; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #141c19; --paper: #1c2923; --ink: #ecf3ed; --muted: #b4c8bd; --line: #53685d; --accent: #94dbb1; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: clamp(1rem, 5vw, 4rem); background: var(--bg); color: var(--ink); font: 1rem/1.6 system-ui, sans-serif; }
+    main { max-width: 46rem; margin: 0 auto; }
+    h1 { font-size: clamp(1.7rem, 5vw, 2.5rem); margin: 0 0 .35rem; }
+    h2 { font-size: 1.4rem; margin: 0 0 1rem; }
+    h3 { font-size: 1rem; margin: 0; }
+    p { margin: 0; }
+    header p, #status, #empty-history { color: var(--muted); }
+    .panel { margin-top: 1.4rem; background: var(--paper); border: 1px solid var(--line); border-radius: .65rem; padding: clamp(1rem, 3vw, 1.6rem); }
+    .actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin-bottom: .8rem; }
+    .picker, button { display: inline-block; position: relative; padding: .5rem .95rem; font: inherit; font-weight: 600; border: 1px solid var(--accent); border-radius: .35rem; cursor: pointer; }
+    .picker { color: var(--paper); background: var(--accent); }
+    .picker input { opacity: 0; position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer; }
+    button { background: var(--paper); color: var(--accent); }
+    button:disabled { opacity: .5; cursor: default; }
+    .picker:focus-within, button:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+    li { padding: .45rem .25rem; }
+    ol { margin: .5rem 0 0; padding-inline-start: 2rem; }
+    #record-title, li { overflow-wrap: anywhere; white-space: pre-wrap; }
+    #empty-history { margin-top: .45rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>源码审阅查看器</h1>
+      <p>请选择<strong>已经脱敏</strong>的 JSON 档案。查看器只在本页内存中读取文件，不上传、不留存，也不改写原件。</p>
+    </header>
+    <section class="panel" aria-label="档案选择">
+      <div class="actions">
+        <label class="picker">选择 JSON 文件<input id="file" type="file" accept=".json,application/json" aria-describedby="limits"></label>
+        <button type="button" id="clear" disabled>清空</button>
+      </div>
+      <p id="limits">每份档案最多 256 KiB、500 条复核记录。</p>
+      <p id="status" role="status">尚未选择档案。</p>
+      <noscript><p>请在浏览器中启用 JavaScript 以读取本地文件。</p></noscript>
+    </section>
+    <article id="record" class="panel" aria-labelledby="record-title" hidden>
+      <h2 id="record-title"></h2>
+      <h3>复核历史</h3>
+      <p id="empty-history" hidden>暂无复核记录。</p>
+      <ol id="history"></ol>
+    </article>
+  </main>
+  <script>
+"use strict";
+
+const maxBytes = 256 * 1024;
+const maxEntries = 500;
+const fileInput = document.querySelector("#file");
+const clearButton = document.querySelector("#clear");
+const statusLine = document.querySelector("#status");
+const record = document.querySelector("#record");
+const heading = document.querySelector("#record-title");
+const historyList = document.querySelector("#history");
+const emptyHistory = document.querySelector("#empty-history");
+let currentRead = 0;
+
+function clearView(message) {
+  currentRead++;
+  fileInput.value = "";
+  record.hidden = true;
+  heading.textContent = "";
+  historyList.replaceChildren();
+  emptyHistory.hidden = true;
+  clearButton.disabled = true;
+  statusLine.textContent = message;
+}
+
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function validationError(data) {
+  if (!isObject(data) || Object.keys(data).some(key => key !== "title" && key !== "history")) {
+    return "档案只接受 title 和 history 两个字段。请检查文件格式。";
+  }
+  if (typeof data.title !== "string" || !data.title.trim()) return "档案缺少有效标题（title）。";
+  if (!Array.isArray(data.history)) return "复核历史（history）必须是数组。";
+  if (data.history.length > maxEntries) return "复核历史超过 500 条，请选择较小的档案。";
+  for (const [index, entry] of data.history.entries()) {
+    if (!isObject(entry) || Object.keys(entry).some(key => key !== "reason")) {
+      return `第 ${index + 1} 条复核记录格式不符，每条仅接受 reason 字段。`;
+    }
+    if (entry.reason != null && typeof entry.reason !== "string") {
+      return `第 ${index + 1} 条复核记录的 reason 必须为文字或 null。`;
+    }
+  }
+  return "";
+}
+
+function display(data) {
+  const items = document.createDocumentFragment();
+  for (const entry of data.history) {
+    const item = document.createElement("li");
+    item.textContent = entry.reason?.trim() ? entry.reason : "未提供原因";
+    items.append(item);
+  }
+  heading.textContent = data.title;
+  historyList.replaceChildren(items);
+  emptyHistory.hidden = data.history.length !== 0;
+  record.hidden = false;
+  statusLine.textContent = `已读取档案，共 ${data.history.length} 条复核记录。`;
+}
+
+fileInput.addEventListener("change", async () => {
+  const file = fileInput.files[0];
+  clearView("尚未选择档案。");
+  if (!file) return;
+  const read = currentRead;
+  if (file.size > maxBytes) {
+    statusLine.textContent = "文件超过 256 KiB，请选择较小的档案。";
+    return;
+  }
+  if (file.size === 0) {
+    statusLine.textContent = "文件为空，请选择包含档案的 JSON 文件。";
+    return;
+  }
+  statusLine.textContent = "正在读取档案…";
+  clearButton.disabled = false;
+  let data;
+  try {
+    const bytes = await file.arrayBuffer();
+    if (read !== currentRead) return;
+    data = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    if (read === currentRead) clearView("无法读取有效的 UTF-8 JSON，请检查文件后重选。");
+    return;
+  }
+  const error = validationError(data);
+  if (error) {
+    clearView(error);
+    return;
+  }
+  display(data);
+});
+
+clearButton.addEventListener("click", () => {
+  clearView("档案已清空。");
+  fileInput.focus();
+});
+window.addEventListener("pagehide", () => clearView("尚未选择档案。"));
+</script>
+</body>
+</html>
