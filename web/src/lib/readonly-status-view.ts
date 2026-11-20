@@ -27,5 +27,11 @@ export function applyOfflineSnapshot(
 ): OfflineView {
   if (!selection || selection !== current.pending || snapshot.kind === "loading") return current;
   if (snapshot.kind !== "ready") return { pending: null, snapshot: { kind: snapshot.kind } };
-  return { pending: null, snapshot, history: history?.map(({ reason }) => ({ reason })) };
+  const displayHistory = Array.isArray(history)
+    ? history.map((entry) => {
+        const reason: unknown = entry?.reason;
+        return { reason: typeof reason === "string" && reason.trim() !== "" ? reason : "未提供原因" };
+      })
+    : undefined;
+  return { pending: null, snapshot, history: displayHistory };
 }

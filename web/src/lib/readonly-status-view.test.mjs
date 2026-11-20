@@ -73,3 +73,28 @@ test("empty selection and non-ready snapshots omit history; a consumed selection
     assert.equal(applyOfflineSnapshot(rejected, selected, sample(1), history), rejected);
   }
 });
+
+test("incomplete review entries keep their positions without exposing other fields", () => {
+  const view = selectOfflineRecord("fixture", true);
+  const history = [
+    { reason: "第一条示例" },
+    { reason: " \t\n ", action: "fixture-extra" },
+    null,
+    { reason: { detail: "fixture-extra" } },
+    { action: "fixture-extra" },
+    { reason: "最后一条示例", detail: "fixture-extra" },
+  ];
+  const result = applyOfflineSnapshot(view, view.pending, sample(0), history);
+  assert.deepEqual(result.history, [
+    { reason: "第一条示例" },
+    { reason: "未提供原因" },
+    { reason: "未提供原因" },
+    { reason: "未提供原因" },
+    { reason: "未提供原因" },
+    { reason: "最后一条示例" },
+  ]);
+  assert.deepEqual(applyOfflineSnapshot(view, view.pending, sample(0), []).history, []);
+  for (const missing of [undefined, null, { reason: "fixture-extra" }]) {
+    assert.equal(applyOfflineSnapshot(view, view.pending, sample(0), missing).history, undefined);
+  }
+});
