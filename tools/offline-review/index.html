@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-v7m7PpVcVwlgMvf0ioxuKcG6mOU3R1K0dE6ck4mKChA='; style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-PI/wqdNeGOFXKxeDWBvdQhaVkYWPdB/RNgweLtOUJtQ='; style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>源码审阅查看器</title>
   <style>
@@ -24,8 +24,10 @@
     .picker { color: var(--paper); background: var(--accent); }
     .picker input { opacity: 0; position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer; }
     button { background: var(--paper); color: var(--accent); }
+    .text-label { display: block; margin: .9rem 0 .3rem; font-weight: 600; }
+    textarea { display: block; width: 100%; margin-bottom: .65rem; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: .35rem; background: var(--paper); color: var(--ink); font: 1rem/1.45 ui-monospace, monospace; resize: vertical; }
     button:disabled { opacity: .5; cursor: default; }
-    .picker:focus-within, button:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+    .picker:focus-within, textarea:focus-visible, button:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
     li { padding: .45rem .25rem; }
     ol { margin: .5rem 0 0; padding-inline-start: 2rem; }
     #record-title, li { overflow-wrap: anywhere; white-space: pre-wrap; }
@@ -36,16 +38,19 @@
   <main>
     <header>
       <h1>源码审阅查看器</h1>
-      <p>请选择<strong>已经脱敏</strong>的 JSON 档案。查看器只在本页内存中读取文件，不上传、不留存，也不改写原件。</p>
+      <p>请选择文件或手动粘贴<strong>已经脱敏</strong>的 JSON。查看器只在本页内存中处理内容，不上传、不留存，也不改写原件。</p>
     </header>
     <section class="panel" aria-label="档案选择">
+      <label class="picker">选择 JSON 文件<input id="file" type="file" accept=".json,application/json" aria-describedby="limits"></label>
+      <label class="text-label" for="json-text">或手动粘贴脱敏 JSON</label>
+      <textarea id="json-text" rows="4" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-describedby="limits"></textarea>
       <div class="actions">
-        <label class="picker">选择 JSON 文件<input id="file" type="file" accept=".json,application/json" aria-describedby="limits"></label>
+        <button type="button" id="show-json" disabled>显示档案</button>
         <button type="button" id="clear" disabled>清空</button>
       </div>
       <p id="limits">每份档案最多 256 KiB、500 条复核记录。</p>
       <p id="status" role="status">尚未选择档案。</p>
-      <noscript><p>请在浏览器中启用 JavaScript 以读取本地文件。</p></noscript>
+      <noscript><p>请在浏览器中启用 JavaScript 以查看档案。</p></noscript>
     </section>
     <article id="record" class="panel" aria-labelledby="record-title" hidden>
       <h2 id="record-title"></h2>
@@ -60,6 +65,8 @@
 const maxBytes = 256 * 1024;
 const maxEntries = 500;
 const fileInput = document.querySelector("#file");
+const textInput = document.querySelector("#json-text");
+const showButton = document.querySelector("#show-json");
 const clearButton = document.querySelector("#clear");
 const statusLine = document.querySelector("#status");
 const record = document.querySelector("#record");
@@ -68,14 +75,16 @@ const historyList = document.querySelector("#history");
 const emptyHistory = document.querySelector("#empty-history");
 let currentRead = 0;
 
-function clearView(message) {
+function clearView(message, keepDraft = false) {
   currentRead++;
   fileInput.value = "";
+  if (!keepDraft) textInput.value = "";
+  showButton.disabled = !textInput.value;
   record.hidden = true;
   heading.textContent = "";
   historyList.replaceChildren();
   emptyHistory.hidden = true;
-  clearButton.disabled = true;
+  clearButton.disabled = !textInput.value;
   statusLine.textContent = message;
 }
 
@@ -112,39 +121,56 @@ function display(data) {
   historyList.replaceChildren(items);
   emptyHistory.hidden = data.history.length !== 0;
   record.hidden = false;
+  clearButton.disabled = false;
   statusLine.textContent = `已读取档案，共 ${data.history.length} 条复核记录。`;
+}
+
+function acceptsSize(size) {
+  if (size > 0 && size <= maxBytes) return true;
+  clearView(size === 0 ? "档案内容为空，请重新输入。" : "档案超过 256 KiB，请缩小后重试。");
+  return false;
+}
+
+function showArchive(bytes) {
+  if (!acceptsSize(bytes.byteLength)) return;
+  let data;
+  try {
+    data = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    clearView("无法读取有效的 UTF-8 JSON，请检查内容。");
+    return;
+  }
+  const error = validationError(data);
+  if (error) clearView(error);
+  else display(data);
 }
 
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files[0];
   clearView("尚未选择档案。");
-  if (!file) return;
+  if (!file || !acceptsSize(file.size)) return;
   const read = currentRead;
-  if (file.size > maxBytes) {
-    statusLine.textContent = "文件超过 256 KiB，请选择较小的档案。";
-    return;
-  }
-  if (file.size === 0) {
-    statusLine.textContent = "文件为空，请选择包含档案的 JSON 文件。";
-    return;
-  }
   statusLine.textContent = "正在读取档案…";
   clearButton.disabled = false;
-  let data;
+  let bytes;
   try {
-    const bytes = await file.arrayBuffer();
-    if (read !== currentRead) return;
-    data = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    bytes = await file.arrayBuffer();
   } catch {
-    if (read === currentRead) clearView("无法读取有效的 UTF-8 JSON，请检查文件后重选。");
+    if (read === currentRead) clearView("无法读取文件，请重新选择。");
     return;
   }
-  const error = validationError(data);
-  if (error) {
-    clearView(error);
-    return;
-  }
-  display(data);
+  if (read === currentRead) showArchive(bytes);
+});
+
+textInput.addEventListener("input", () => {
+  clearView(textInput.value ? "已输入文本，点击“显示档案”查看。" : "尚未输入档案。", true);
+});
+showButton.addEventListener("click", () => {
+  const text = textInput.value;
+  clearView("");
+  // UTF-8 needs at least as many bytes as UTF-16 code units.
+  if (acceptsSize(text.length)) showArchive(new TextEncoder().encode(text));
+  textInput.focus();
 });
 
 clearButton.addEventListener("click", () => {
