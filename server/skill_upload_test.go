@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -37,6 +38,11 @@ func TestValidSkillName(t *testing.T) {
 }
 
 func TestSkillRelPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// skillRelPath normalises to slash-separated archive paths; the Windows build
+		// of the same helper keeps backslashes, so this contract is asserted on Linux.
+		t.Skip("slash-separated skill paths are a POSIX contract")
+	}
 	ok := map[string]string{
 		"SKILL.md":           "SKILL.md",
 		"scripts/run.py":     "scripts/run.py",

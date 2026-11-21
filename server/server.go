@@ -44,6 +44,12 @@ type Server struct {
 	engine *Engine
 	ctx    context.Context
 
+	// Campaign runtime (native fuzz campaigns). Lazily initialised so a task-level
+	// feature never blocks startup; initNativeCampaign reports why it is unavailable.
+	campaignOnce    sync.Once
+	campaign        *nativeCampaignRuntime
+	campaignInitErr error
+
 	skillDir string // root directory for skill subdirectories
 	jwtKey   []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
 
@@ -228,7 +234,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		if err := seedReverseRoles(m.pg, m.dir); err != nil {
 			log.Printf("[reverse roles] seed failed: %v", err)
 		}
-		wireAgentAugment(m.pg, s.skillDir, s.hostTools, m.dir) // 可见 skills/MCP + 流量/编排 host 工具装配进 agent 工具集
+		wireAgentAugment(m.pg, s.skillDir, s.hostTools, s.campaignService, m.dir) // 可见 skills/MCP + 流量/编排 host 工具装配进 agent 工具集
 		domainReg := buildDomainReg(m.Assets())
 		wireTools(m.pg, domainReg, m.dir) // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
 		seedPrompts(m.pg)                 // 同步可识别的内置默认，保留自定义提示词与历史
@@ -248,6 +254,14 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		_, _ = m.pg.Exec(`UPDATE reverse_runtime_runs SET status='failed',last_error='服务中断；自有运行环境的清理需核对，未自动重试',finished_at=now() WHERE status='running'`)
 		_, _ = m.pg.Exec(`UPDATE reverse_native_runs n SET target_state='failed' FROM reverse_runtime_runs r WHERE n.run_id=r.id AND r.status='failed' AND n.target_state IN ('starting','running','stopped')`)
 		go s.evidenceStore().RunGC(s.ctx)
+		// Campaigns that were mid-flight when this process died cannot be trusted: the
+		// ledger rows are marked interrupted for the recovery sweep, then the runtime is
+		// initialised (or reports why it cannot be).
+		_, _ = m.pg.Exec(nativeCampaignLegacyRuntimeStartupSQL)
+		_, _ = m.pg.Exec(nativeCampaignLegacyNativeStartupSQL)
+		if err := s.initNativeCampaign(); err != nil {
+			log.Printf("[native campaign] unavailable or awaiting explicit recovery: %v", err)
+		}
 		s.seedPythonInterpreter()     // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
 		go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
 		// 漏洞 IM 推送投递引擎。与 Scheduler 并列但独立：推送的实时性要求(3s)
@@ -574,6 +588,16 @@ func (s *Server) chatUnavailableReason() string {
 		if active, err := s.m.pg.ActiveProfile(); err == nil && active == nil {
 			return "没有已激活的 LLM 配置：请到 系统 → LLM 配置 激活一个，或在本对话为该会话指定一个配置"
 		}
+		// ActiveProfile falls back to the highest-priority keyed profile when no row is
+		// marked active, so a non-nil result alone cannot prove an activation. The
+		// operator still needs the activation hint, and the message names the profile
+		// that would actually be used.
+		if marked, err := s.m.pg.HasDefaultProfile(); err == nil && !marked {
+			if active, nameErr := s.m.pg.ActiveProfile(); nameErr == nil && active != nil && active.Name != "" {
+				return "没有已激活的 LLM 配置：请到 系统 → LLM 配置 激活一个（当前会临时使用 " + active.Name + "）"
+			}
+			return "没有已激活的 LLM 配置：请到 系统 → LLM 配置 激活一个"
+		}
 	}
 	return "LLM 未就绪，无法对话：请检查 系统 → LLM 配置是否有可用且已激活的配置"
 }
@@ -677,6 +701,7 @@ func (s *Server) Handler() http.Handler {
 	s.reverseRuntimeRoutes(mux)
 	s.reverseDebugRoutes(mux)
 	s.reverseNativeRoutes(mux)
+	s.ctfFlagRoutes(mux)
 
 	// Auth routes — exempt from JWT check (handled in requireAuth)
 	mux.HandleFunc("GET /api/auth/status", s.authStatus)
@@ -991,7 +1016,10 @@ func (s *Server) Handler() http.Handler {
 // --- handlers ---
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"ok": true, "service": "artex", "version": BuildVersion})
+	// llm_configured is part of health on purpose: without a provider every task dies
+	// with a per-intent model_error, which reads like a network problem instead of a
+	// missing profile. /api/health stays unauthenticated, so it carries only a bool.
+	writeJSON(w, 200, map[string]any{"ok": true, "service": "artex", "version": BuildVersion, "llm_configured": s.engine.Ready()})
 }
 
 func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
@@ -1102,6 +1130,12 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		dto.GoalsTotal = metric.Goals.Total
 		dto.GoalsMet = metric.Goals.Met
 		dto.InFlight = metric.RunningIntents
+		dto.OpenIntents = metric.OpenIntents
+		dto.BlockedIntents = metric.BlockedIntents
+		dto.OldestOpenSeconds = metric.OldestOpenSecond
+		dto.OldestRunSeconds = metric.OldestRunningSecond
+		dto.Flags = metric.Flags
+		dto.Mode = t.Mode
 		dto.Findings = FindingSeverityDTO{
 			Critical: metric.Findings.Critical,
 			High:     metric.Findings.High,
@@ -1504,6 +1538,9 @@ type createTaskReq struct {
 	TimeoutSeconds       int                `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
 	PlanHeartbeatSeconds int                `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
 	SeedFirstIntent      *bool              `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
+	// Mode 是任务工作模式：normal(默认，原逻辑) 或 ctf(比赛：时间盒 + flag 口径)。
+	// 它不改变 Kind，只在与 Kind 正交的策略层生效。
+	Mode                 string             `json:"mode,omitempty"`
 	CoverageEnabled      *bool              `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
 	// InterceptRules 任务级资产拦截/允许规则(创建时录入,存 task_intercept_rules,不进全局表)。
 	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
@@ -1560,11 +1597,33 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.Description) == "" {
 		req.Description = "未命名任务"
 	}
+	switch strings.TrimSpace(req.Mode) {
+	case "":
+		req.Mode = "normal"
+	case "normal", "ctf":
+		req.Mode = strings.TrimSpace(req.Mode)
+	default:
+		writeErr(w, 400, "任务模式无效")
+		return
+	}
+	if req.Mode == "ctf" {
+		// CTF is time-boxed and flag-first: coverage is meaningless there, and the
+		// seed intent saves the first planning round inside the competition clock.
+		disabled := false
+		req.CoverageEnabled = &disabled
+		if req.TimeoutSeconds <= 0 {
+			req.TimeoutSeconds = 7200
+		}
+		if req.SeedFirstIntent == nil {
+			seed := true
+			req.SeedFirstIntent = &seed
+		}
+	}
 	if req.Kind == "reverse" {
 		disabled := false
 		req.CoverageEnabled = &disabled
 		if strings.TrimSpace(req.Goal) == "" {
-			req.Goal = "对上传材料进行有界结构调查，给出入口、主要模块及有证据支持的行为说明，并列出未决问题。"
+			req.Goal = "在授权范围内对上传材料做漏洞探索：梳理入口与信任边界，逐个输入面找可复现的安全缺陷；发现的每个候选都要给出定位、触发条件与最小复现，并明确哪些面已排查且未发现问题。"
 		}
 	}
 	if err := s.validateTaskProfileIDs(req.LLMProfileIDs); err != nil {
@@ -1606,6 +1665,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
 		Kind: req.Kind,
+		Mode: strings.TrimSpace(req.Mode),
 		Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,

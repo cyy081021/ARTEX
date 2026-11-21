@@ -1329,6 +1329,16 @@ type TaskListMetrics struct {
 	Goals          GoalCounts
 	RunningIntents int                   // kind='intent' 且 state='running' 的条数，即运行中 Worker 数
 	Findings       FindingSeverityCounts // findings 表里该任务的漏洞数（按严重度分档）
+	// Frontier 口径：意图是排队还是被执行。并发不足时 open 会持续堆积而 running
+	// 不变，此前这类饥饿没有任何可见信号。
+	OpenIntents      int   // state='open'：已规划但未被认领
+	BlockedIntents   int   // state='blocked'：worker 已报告阻塞，等待人工或新证据
+	OldestOpenSecond int64 // 最久未认领意图的等待秒数（无 open 意图时为 0）
+	// 引擎会立刻认领意图，所以排队往往表现为"某条 running 意图很久没有推进"，
+	// 而不是 open 堆积。这个时长是发现卡死的直接信号。
+	OldestRunningSecond int64
+	// CTF 模式的唯一交付物是 flag，列表里要有计数，否则比赛进度不可见。
+	Flags int
 }
 
 // TaskListMetricsAll returns list aggregates for every live task in one query.
@@ -1345,6 +1355,11 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 		       COALESCE(goal_metrics.total,0),
 		       COALESCE(goal_metrics.met,0),
 		       COALESCE(intent_metrics.running,0),
+		       COALESCE(intent_metrics.open,0),
+		       COALESCE(intent_metrics.blocked,0),
+		       COALESCE(intent_metrics.oldest_open,0),
+		       COALESCE(intent_metrics.oldest_running,0),
+		       COALESCE(flag_metrics.count,0),
 		       COALESCE(finding_metrics.critical,0),
 		       COALESCE(finding_metrics.high,0),
 		       COALESCE(finding_metrics.medium,0),
@@ -1372,10 +1387,17 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			WHERE exploration_id=task.exploration_id AND kind='goal'
 		) goal_metrics ON true
 		LEFT JOIN LATERAL (
-			SELECT COUNT(*) AS running
+			SELECT COUNT(*) FILTER (WHERE state='running') AS running,
+			       COUNT(*) FILTER (WHERE state='open') AS open,
+			       COUNT(*) FILTER (WHERE state='blocked') AS blocked,
+			       COALESCE(EXTRACT(EPOCH FROM now() - MIN(created_at) FILTER (WHERE state='open'))::bigint,0) AS oldest_open,
+			       COALESCE(EXTRACT(EPOCH FROM now() - MIN(created_at) FILTER (WHERE state='running'))::bigint,0) AS oldest_running
 			FROM exploration_nodes
-			WHERE exploration_id=task.exploration_id AND kind='intent' AND state='running'
+			WHERE exploration_id=task.exploration_id AND kind='intent'
 		) intent_metrics ON true
+		LEFT JOIN LATERAL (
+			SELECT COUNT(*) AS count FROM task_flags WHERE task_id=task.id
+		) flag_metrics ON true
 		LEFT JOIN LATERAL (
 			SELECT COUNT(*) FILTER (WHERE severity='critical') AS critical,
 			       COUNT(*) FILTER (WHERE severity='high')     AS high,
@@ -1403,6 +1425,11 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			&metrics.Goals.Total,
 			&metrics.Goals.Met,
 			&metrics.RunningIntents,
+			&metrics.OpenIntents,
+			&metrics.BlockedIntents,
+			&metrics.OldestOpenSecond,
+			&metrics.OldestRunningSecond,
+			&metrics.Flags,
 			&metrics.Findings.Critical,
 			&metrics.Findings.High,
 			&metrics.Findings.Medium,

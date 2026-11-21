@@ -949,7 +949,7 @@ export default function TasksPage() {
                     <TableHead className="text-center" title="严重 / 高 / 中 / 低">
                       漏洞 <span className="text-muted-foreground font-normal">严/高/中/低</span>
                     </TableHead>
-                    <TableHead className="text-center">运行中 Worker</TableHead>
+                    <TableHead className="text-center">运行中 / 排队</TableHead>
                     <SortableTaskHead
                       field="created"
                       label="创建时间"
@@ -1189,6 +1189,15 @@ const TaskRow = React.memo(function TaskRow({
         <div className="flex max-w-xs items-center gap-2">
           <TaskNameEditor task={task} onRename={onRename} />
           <Badge variant="outline" className="shrink-0">{task.kind === "reverse" ? "逆向" : "渗透"}</Badge>
+          {task.mode === "ctf" && (
+            <Badge
+              variant="outline"
+              className="shrink-0 border-amber-500/60 text-amber-700 dark:text-amber-400"
+              title={`CTF 模式${(task.flags ?? 0) > 0 ? ` · 已捕获 ${task.flags} 个 flag` : ""}`}
+            >
+              CTF{(task.flags ?? 0) > 0 ? ` 🚩${task.flags}` : ""}
+            </Badge>
+          )}
           {task.active && <StarIcon className="size-4 shrink-0 fill-amber-400 text-amber-400" />}
           {taskIsPinned(task) && <PinIcon className="text-primary size-4 shrink-0" aria-label="已置顶" />}
         </div>
@@ -1238,11 +1247,27 @@ const TaskRow = React.memo(function TaskRow({
         })()}
       </TableCell>
       <TableCell className="text-center text-xs tabular-nums">
-        {task.in_flight && task.in_flight > 0 ? (
-          <span className="text-foreground font-medium">{task.in_flight}</span>
-        ) : (
-          <span className="text-muted-foreground">0</span>
-        )}
+        {(() => {
+          // 运行中 / 排队中：排队数长期大于 0 而运行数为 0 就是并发饥饿，
+          // 之前这种状态在列表里完全看不出来。
+          const running = task.in_flight ?? 0;
+          const open = task.open_intents ?? 0;
+          if (running === 0 && open === 0) return <span className="text-muted-foreground">0</span>;
+          const oldest = task.oldest_open_seconds ?? 0;
+          const longestRun = task.oldest_run_seconds ?? 0;
+          const stuck = longestRun >= 1800; // 30 分钟没有任何结论推进的意图值得看一眼
+          return (
+            <span
+              className="font-medium whitespace-nowrap"
+              title={`运行中 ${running} · 排队 ${open}${oldest > 0 ? ` · 最久排队 ${fmtDuration(oldest)}` : ""}${longestRun > 0 ? ` · 最久运行 ${fmtDuration(longestRun)}` : ""}${(task.blocked_intents ?? 0) > 0 ? ` · 阻塞 ${task.blocked_intents}` : ""}`}
+            >
+              <span className={running > 0 ? "text-foreground" : "text-muted-foreground"}>{running}</span>
+              <span className="text-muted-foreground">/</span>
+              <span className={open > 0 && running === 0 ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}>{open}</span>
+              {stuck ? <span className="text-amber-600 dark:text-amber-400" title="有意图长时间未推进"> ⏳</span> : null}
+            </span>
+          );
+        })()}
       </TableCell>
       <TableCell className="text-muted-foreground text-right text-xs whitespace-nowrap tabular-nums">
         {fmtDateTime(task.created_unix)}
@@ -3083,7 +3108,9 @@ function CreateTaskSheet({
   const [creating, setCreating] = React.useState(false);
   const [timeoutMin, setTimeoutMin] = React.useState(""); // 任务级超时(分钟);空/0 = 不限时
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
-  const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
+  const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行
+  // 任务工作模式：normal=产品默认逻辑，ctf=比赛（时间盒 + flag 口径 + 换路线）。与任务类型正交。
+  const [taskMode, setTaskMode] = React.useState<"normal" | "ctf">("normal");
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
   const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
   // Material bytes are uploaded after the routing decision.
@@ -3128,6 +3155,7 @@ function CreateTaskSheet({
       const heartbeatSec = Math.max(10, Math.floor(Number(heartbeatMin) || 10)) * 60; // 下限 10min，与后端归一一致
       const created = await api.createTask({
         kind: "auto",
+        mode: taskMode,
         name: name.trim(),
         categoryId: categoryID,
         description: description.trim(),
@@ -3216,9 +3244,21 @@ function CreateTaskSheet({
         <div className="flex-1 overflow-y-auto p-6">
           <div className="grid gap-5">
             <Field>
-              <FieldLabel>任务类型</FieldLabel>
+              <FieldLabel htmlFor="task-mode">任务模式</FieldLabel>
+              <Select value={taskMode} onValueChange={(v) => setTaskMode(v as "normal" | "ctf")}>
+                <SelectTrigger id="task-mode" aria-label="任务模式">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="normal">正常</SelectItem>
+                  <SelectItem value="ctf">CTF 比赛</SelectItem>
+                </SelectContent>
+              </Select>
               <FieldDescription>
-                由 AI 根据描述、目标和材料文件名及大小判断；材料正文不会用于分类。混合任务之后仍可请求其他工作流协助。
+                {taskMode === "ctf"
+                  ? "比赛模式：以 flag 为唯一交付，自动关覆盖度、开启种子意图，未填超时则默认 2 小时；同一路线连续无进展会要求换路线。"
+                  : "正常模式：沿用默认探索策略（硬底线、深度优先、结构化验收）。"}
+                任务类型仍由 AI 根据描述、目标与材料判断。
               </FieldDescription>
             </Field>
             <TaskTemplateControls

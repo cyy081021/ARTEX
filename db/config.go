@@ -112,13 +112,38 @@ func (d *DB) ListProfiles() ([]*LLMProfile, error) {
 }
 
 // ActiveProfile returns the default (active) profile with its api key, or nil.
+//// If no row carries is_default — a single stray flag, a half-applied UI action or a
+// test run flipping it would otherwise take the whole engine down with a misleading
+// "no available fallback LLM provider" per task — fall back to the highest-priority
+// keyed profile. That fallback is read-only: the stored default is not rewritten, so
+// the operator still sees which profile is marked active.
 func (d *DB) ActiveProfile() (*LLMProfile, error) {
 	var p LLMProfile
 	err := scanProfile(d.QueryRow(`SELECT `+profileColsKey+` FROM llm_profiles WHERE is_default LIMIT 1`), &p.APIKey, &p)
 	if err == sql.ErrNoRows {
-		return nil, nil
+		fallback := LLMProfile{}
+		if fbErr := scanProfile(d.QueryRow(`SELECT `+profileColsKey+` FROM llm_profiles
+WHERE COALESCE(api_key,'') <> '' AND NOT pool_exclude
+ORDER BY priority DESC, id ASC LIMIT 1`), &fallback.APIKey, &fallback); fbErr != nil {
+			if fbErr == sql.ErrNoRows {
+				return nil, nil
+			}
+			return nil, fbErr
+		}
+		return &fallback, nil
 	}
 	return &p, err
+}
+
+// HasDefaultProfile reports whether any row is explicitly marked active. Callers use it
+// to distinguish "nothing is activated" from "the active profile cannot be used", which
+// ActiveProfile's read-only fallback deliberately blurs.
+func (d *DB) HasDefaultProfile() (bool, error) {
+	var active bool
+	if err := d.QueryRow(`SELECT EXISTS(SELECT 1 FROM llm_profiles WHERE is_default)`).Scan(&active); err != nil {
+		return false, err
+	}
+	return active, nil
 }
 
 // ProfileByID returns one profile with its api key by id, or nil if not found.

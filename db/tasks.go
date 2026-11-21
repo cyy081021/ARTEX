@@ -13,6 +13,9 @@ import (
 type Task struct {
 	ID              int64      `json:"id"`
 	Kind            string     `json:"kind"`
+	// Mode is the task-level working mode ("normal" or "ctf"). It never changes the
+	// workflow kind; CTF is an additive policy layer on top of normal behaviour.
+	Mode            string     `json:"mode"`
 	WorkflowVersion int        `json:"workflow_version"`
 	Name            string     `json:"name"` // 可选任务名称;空=未命名
 	CategoryID      *int64     `json:"category_id,omitempty"`
@@ -146,7 +149,10 @@ func (d *DB) CreateTask(description, goal string, llmProfileID *int64, timeoutSe
 // TaskCreateOptions contains the task data that must be committed atomically
 // with the task/exploration row.
 type TaskCreateOptions struct {
-	Kind                 string
+	Kind string
+	// Mode selects the task-level working policy: "normal" (default) or "ctf".
+	// CTF keeps every normal behaviour and only adds the competition overlay.
+	Mode                 string
 	Name                 string // 可选任务名称;空=未命名
 	CategoryID           *int64
 	SourceTaskIDs        []int64
@@ -169,6 +175,13 @@ func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOpti
 	}
 	if opts.Kind != "pentest" && opts.Kind != "reverse" {
 		return nil, fmt.Errorf("invalid task kind %q", opts.Kind)
+	}
+	switch opts.Mode {
+	case "":
+		opts.Mode = "normal"
+	case "normal", "ctf":
+	default:
+		return nil, fmt.Errorf("invalid task mode %q", opts.Mode)
 	}
 	if len(opts.SourceTaskIDs) > MaxTaskSourceCount {
 		return nil, fmt.Errorf("too many source tasks: got %d, maximum is %d", len(opts.SourceTaskIDs), MaxTaskSourceCount)
@@ -228,7 +241,7 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 		active = &id
 	}
 	t := &Task{
-		Kind: opts.Kind, WorkflowVersion: 1,
+		Kind: opts.Kind, Mode: opts.Mode, WorkflowVersion: 1,
 		Name: opts.Name, CategoryID: opts.CategoryID, CategoryName: categoryName,
 		Description: description, Goal: goal, ExplorationID: expID,
 		LLMProfileID: active, ActiveLLMProfileID: active,
@@ -239,9 +252,9 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 		CoverageEnabled: coverageEnabled,
 	}
 	if err := tx.QueryRow(`
-INSERT INTO tasks(name, category_id, description, goal, exploration_id, llm_profile_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled, kind, workflow_version, paused)
-VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9,$10,1,$10='reverse')
-RETURNING id, status, paused, created_at, kind, workflow_version`, opts.Name, opts.CategoryID, description, goal, expID, active, opts.TimeoutSeconds, opts.PlanHeartbeatSeconds, coverageEnabled, opts.Kind).Scan(&t.ID, &t.Status, &t.Paused, &t.CreatedAt, &t.Kind, &t.WorkflowVersion); err != nil {
+INSERT INTO tasks(name, category_id, description, goal, exploration_id, llm_profile_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled, kind, mode, workflow_version, paused)
+VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9,$10,$11,1,$10='reverse')
+RETURNING id, status, paused, created_at, kind, mode, workflow_version`, opts.Name, opts.CategoryID, description, goal, expID, active, opts.TimeoutSeconds, opts.PlanHeartbeatSeconds, coverageEnabled, opts.Kind, opts.Mode).Scan(&t.ID, &t.Status, &t.Paused, &t.CreatedAt, &t.Kind, &t.Mode, &t.WorkflowVersion); err != nil {
 		return nil, err
 	}
 	if err := insertTaskRelations(tx, t.ID, opts.SourceTaskIDs); err != nil {
@@ -355,13 +368,13 @@ func insertTaskLLMProfiles(tx *sql.Tx, taskID int64, profileIDs []int64) error {
 	return nil
 }
 
-const taskCols = `id, kind, workflow_version, COALESCE(name,''), category_id,
+const taskCols = `id, kind, COALESCE(mode,'normal'), workflow_version, COALESCE(name,''), category_id,
 COALESCE((SELECT category.name FROM task_categories category WHERE category.id=tasks.category_id),''),
 description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), first_run_at, deadline_at`
 
 func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 	var t Task
-	if err := sc.Scan(&t.ID, &t.Kind, &t.WorkflowVersion, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.FirstRunAt, &t.DeadlineAt); err != nil {
+	if err := sc.Scan(&t.ID, &t.Kind, &t.Mode, &t.WorkflowVersion, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.FirstRunAt, &t.DeadlineAt); err != nil {
 		return nil, err
 	}
 	t.Pinned = t.PinnedAt != nil

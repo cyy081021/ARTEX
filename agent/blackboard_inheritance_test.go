@@ -82,26 +82,25 @@ func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
 	if !ok {
 		t.Fatalf("coverage missing: %#v", overview["coverage"])
 	}
-	scopeRows, ok := coverage["scope"].([]map[string]any)
-	if !ok || len(scopeRows) != 1 {
-		t.Fatalf("task scope missing: %#v", coverage["scope"])
+	// The coverage block deliberately no longer flattens scope rows (that list is
+	// re-sent every round). The company link is proven by the task-scoped rows the
+	// creation path writes, plus the fact that the company asset lands in the
+	// coverage denominator.
+	scopeRows, err := assets.ListTaskScope(task.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	companyScope, ok := scopeRows[0]["company_scope"].([]map[string]any)
-	if !ok || len(companyScope) != len(inputs) {
-		t.Fatalf("company scope not expanded: %#v", scopeRows[0])
-	}
-	kinds := make(map[string]string, len(companyScope))
-	for _, rule := range companyScope {
-		kinds[fmt.Sprint(rule["kind"])] = fmt.Sprint(rule["value"])
-	}
-	for _, input := range inputs {
-		if kinds[input.Kind] != input.Value {
-			t.Errorf("scope %s=%q want %q", input.Kind, kinds[input.Kind], input.Value)
+	companyScoped := false
+	for _, row := range scopeRows {
+		if row.Kind == "company" && row.CompanyID != nil && *row.CompanyID == companyID {
+			companyScoped = true
 		}
 	}
-	keywords, ok := scopeRows[0]["company_keywords"].([]string)
-	if !ok || len(keywords) != 1 || keywords[0] != keyword {
-		t.Fatalf("company keywords missing: %#v", scopeRows[0]["company_keywords"])
+	if !companyScoped {
+		t.Fatalf("company scope row missing from task: %#v", scopeRows)
+	}
+	if denominator, _ := coverage["denominator"].(int); denominator < 1 {
+		t.Fatalf("company scope did not anchor the coverage denominator: %#v", coverage)
 	}
 	if hc, _ := coverage["host_count"].(int); hc < 1 {
 		t.Fatalf("company asset host not counted in agent context: %#v", coverage["host_count"])

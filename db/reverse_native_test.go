@@ -108,12 +108,12 @@ func TestNativeArchiveScopeAllowsLegacyPackagesWithoutNativeTables(t *testing.T)
 	if err := validateNativeArchiveScope(snapshot); err != nil {
 		t.Fatalf("legacy archive should not require native tables: %v", err)
 	}
-	for version := 1; version <= 5; version++ {
+	for version := 1; version <= TaskArchiveFormatVersion; version++ {
 		if !IsTaskArchiveFormatSupported(version) {
 			t.Errorf("archive version %d should be supported", version)
 		}
 	}
-	if IsTaskArchiveFormatSupported(6) {
+	if IsTaskArchiveFormatSupported(TaskArchiveFormatVersion + 1) {
 		t.Fatal("future archive version should not be supported")
 	}
 }
@@ -232,7 +232,7 @@ func TestNativeArchiveSnapshotRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.FormatVersion != 5 || snapshot.DataCounts["reverse_native_cases"] != 2 || snapshot.DataCounts["reverse_native_runs"] != 1 || snapshot.DataCounts["finding_native_evidence"] != 1 {
+	if snapshot.FormatVersion != TaskArchiveFormatVersion || snapshot.DataCounts["reverse_native_cases"] != 2 || snapshot.DataCounts["reverse_native_runs"] != 1 || snapshot.DataCounts["finding_native_evidence"] != 1 {
 		t.Fatalf("native archive counts/version: version=%d counts=%v", snapshot.FormatVersion, snapshot.DataCounts)
 	}
 	if err := d.CompleteTaskArchive(archive.ID, snapshot, "fixture.tar.zst", "fixture", 1, 1); err != nil {

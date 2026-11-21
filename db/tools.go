@@ -123,6 +123,24 @@ func (d *DB) EnsureToolSchemaFields(key string, fields map[string]any, required 
 	return err
 }
 
+// EnsureToolAgents repairs a built-in tool row that ended up with NO agent
+// binding, which makes the tool invisible to every role even though the code
+// still defines it. SeedTool is first-insert-only, so a row created by an older
+// build (or by hand) never picks up a later default binding. Only an empty
+// binding is repaired: an operator who deliberately unbound some roles keeps
+// that decision, because a non-empty list is left untouched.
+func (d *DB) EnsureToolAgents(key string, agents json.RawMessage) error {
+	if len(agents) == 0 {
+		return nil
+	}
+	var want []string
+	if err := json.Unmarshal(agents, &want); err != nil || len(want) == 0 {
+		return err
+	}
+	_, err := d.Exec(`UPDATE tools SET agents=$2::jsonb WHERE key=$1 AND jsonb_array_length(COALESCE(agents,'[]'::jsonb))=0`, key, string(agents))
+	return err
+}
+
 func scanTool(rows interface{ Scan(...any) error }) (*Tool, error) {
 	var t Tool
 	var agents []byte

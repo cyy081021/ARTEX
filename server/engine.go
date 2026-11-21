@@ -96,12 +96,17 @@ type Engine struct {
 
 	bc *Broadcaster // live activity pub/sub (SSE)
 
-	started      sync.Map // taskID -> bool, so Run is idempotent per task
-	lastAct      sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
-	llmCalls     sync.Map // taskID -> *int64, actual planner/worker/main-agent LLM calls
-	paused       sync.Map // taskID -> bool, user-paused (planner + workers idle but loops alive)
-	deleting     sync.Map // taskID -> bool, delete barrier (no new task-owned writes)
-	dropCnt      sync.Map // taskID -> *int64, running count of dropped (unpersistable) activity records
+	started  sync.Map // taskID -> bool, so Run is idempotent per task
+	lastAct  sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
+	llmCalls sync.Map // taskID -> *int64, actual planner/worker/main-agent LLM calls
+	paused   sync.Map // taskID -> bool, user-paused (planner + workers idle but loops alive)
+	deleting sync.Map // taskID -> bool, delete barrier (no new task-owned writes)
+	dropCnt  sync.Map // taskID -> *int64, running count of dropped (unpersistable) activity records
+	// stallRounds counts consecutive planning rounds that ended with no intent in
+	// play (open/waiting/running all empty) while a goal is still open. The planner
+	// prompt forbids that state; when the model still yields nothing we surface the
+	// stall instead of waiting silently forever.
+	stallRounds  sync.Map // taskID -> *int64
 	claimBackoff sync.Map // taskID -> time.Time; bounded retries after a database failure
 
 	// deleteMu makes installing the delete barrier atomic with registering a new
@@ -303,6 +308,7 @@ func (e *Engine) StopTask(taskID string) {
 	e.paused.Delete(taskID)
 	e.dropCnt.Delete(taskID)
 	e.claimBackoff.Delete(taskID)
+	e.stallRounds.Delete(taskID)
 	e.plannerRound.Delete(taskID)
 	e.settling.Delete(taskID)
 	e.deadline.Delete(taskID)
@@ -349,6 +355,7 @@ func (e *Engine) execContextFor(parent context.Context, taskID string) context.C
 	if e.m != nil {
 		if task, ok := e.m.Task(taskID); ok {
 			parent = agent.WithWorkflow(parent, task.Kind)
+			parent = agent.WithMode(parent, task.Mode)
 		}
 	}
 	e.execMu.Lock()
@@ -964,6 +971,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		default:
 			log.Printf("[planner] task %s 规划完成", t.ID)
 		}
+		e.trackPlannerStall(t, met, err)
 		e.touch(t.ID)
 	}
 
@@ -984,6 +992,41 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		}
 		resetPlannerTimer(heartbeat, next)
 	}
+}
+
+// trackPlannerStall records a planning round that ended with nothing in play while
+// a goal is still open — the "hard floor" state the planner prompt forbids. One
+// such round stays silent (the model may be recording a justified no_progress
+// decision); a second consecutive one is surfaced as an error activity so the
+// operator sees a stalled task instead of a task that looks alive but never moves.
+func (e *Engine) trackPlannerStall(t *Task, met bool, err error) {
+	if t == nil {
+		return
+	}
+	if met || err != nil || t.Store == nil {
+		e.stallRounds.Delete(t.ID)
+		return
+	}
+	if open, oerr := t.Store.HasOpenGoal(); oerr != nil || !open {
+		e.stallRounds.Delete(t.ID)
+		return
+	}
+	active, aerr := t.Store.HasActiveIntent()
+	if aerr != nil || active {
+		e.stallRounds.Delete(t.ID)
+		return
+	}
+	var n int64 = 1
+	if v, ok := e.stallRounds.Load(t.ID); ok {
+		n = *v.(*int64) + 1
+	}
+	e.stallRounds.Store(t.ID, &n)
+	if n < 2 {
+		return
+	}
+	log.Printf("[planner] task %s 探索停摆: 连续 %d 轮无 open/waiting/running 意图", t.ID, n)
+	e.emitActivity(t, db.Activity{Worker: "system", Kind: "error", IsError: true,
+		Summary: fmt.Sprintf("探索停摆：连续 %d 轮规划后仍无 open/waiting/running 意图且目标未达成；请补充材料、授权或运行环境，或调整目标后继续", n)})
 }
 
 func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
@@ -1266,7 +1309,24 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		} else {
 			state = settledState
 			if state == "blocked" && err == nil {
-				e.emitActivity(t, db.Activity{NodeID: &iid, Worker: "system", Kind: "text", Summary: "工作未通过验收：结果未提交、仍有阻塞或证据已变化；保留已有产物供复核"})
+				reason, blocker := t.Store.IntentSettlement(context.Background(), intent.ID)
+				summary := "工作未通过验收：结果未提交、仍有阻塞或证据已变化；保留已有产物供复核"
+				switch reason {
+				case "worker_reported_blocker":
+					sum := "worker 已提交阻塞结果"
+					if strings.TrimSpace(blocker) != "" {
+						if len([]rune(blocker)) > 200 {
+							blocker = string([]rune(blocker)[:200]) + "…"
+						}
+						sum += "：" + blocker
+					}
+					summary = sum
+				case "missing_or_invalid_result":
+					summary = "缺少有效结果：worker 未提交可验收的 execution_result"
+				case "stale_result_evidence":
+					summary = "提交时引用的证据已变化，需重新取证后再提交"
+				}
+				e.emitActivity(t, db.Activity{NodeID: &iid, Worker: "system", Kind: "text", Summary: summary})
 			}
 		}
 	}

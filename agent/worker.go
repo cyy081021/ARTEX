@@ -409,6 +409,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		sysBody += renderReverseBudget(w.maxTurns, reverseBudgetInfo)
 		sysBody += renderReverseContinuation(intent)
 	}
+	if IsCTF(ctx) {
+		sysBody += ctfOverlay("worker")
+	}
 	var constraintSnapshot []db.Constraint
 	refreshConstraints := w.wantConstraints()
 	if refreshConstraints {

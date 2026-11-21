@@ -188,6 +188,11 @@ func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
 	if err = s.evidenceStore().CopySnapshots(s.ctx, evidenceSnapshots, filepath.Join(fileStage.payload, "evidence")); err != nil {
 		return err
 	}
+	// v6 retains the Campaign graph with its immutable files; verify the payload that was
+	// just staged, not the live source, before it is compressed into the package.
+	if err = verifyNativeCampaignArchiveFiles(s.ctx, fileStage.payload, snapshot); err != nil {
+		return err
+	}
 	_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "compress", 50)
 	originalSize, compressedSize, checksum, err := writeTaskArchivePackage(archivePath, fileStage.payload, snapshot)
 	if err != nil {
@@ -282,6 +287,11 @@ func (s *Server) restoreTaskArchive(job *pgdb.TaskArchive) (runErr error) {
 	}
 	evidenceSnapshots, err := pgdb.ArchiveEvidenceSnapshots(&snapshot)
 	if err != nil {
+		return err
+	}
+	// The extracted payload is the only trusted source for restore: a package whose
+	// Campaign files are missing or altered must never reach the restore transaction.
+	if err = verifyNativeCampaignArchiveFiles(s.ctx, extracted, &snapshot); err != nil {
 		return err
 	}
 	return s.evidenceStore().WithInstalledSnapshots(s.ctx, evidenceSnapshots, filepath.Join(extracted, "evidence"), func() error {

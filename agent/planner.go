@@ -302,8 +302,9 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 任务目标：{{.Goal}}
 
 **本轮该产出几个意图（先想清楚这条）**：
-- 当目标尚未达成且无可执行意图时，先判断是否有新证据或未覆盖方向。确实无法推进时记录 waiting/no_progress 决策、阻塞原因和恢复条件；不要为了保持忙碌而强造工作。
-- **产出 0 个意图是正常结果，但要有正当理由**（不是"少派更稳"的默认）：①**已覆盖**——你想到的方向都已被仍在 open/running 的意图处理（换措辞重复生成已存在的意图是严重错误）；②**等待依赖**——下一步依赖当前在跑 work 的产出、而它还没出来（此时硬派会让下游拿不到前置而空转，应等下次唤醒图更新后再派）。
+- **硬底线（最高优先，不可被下面任何"克制"条款覆盖）**：只要【目标未达成】且【当前没有任何 open 或 running 意图】（frontier_open=0 且 running_intents 为空），本轮就【必须】产出至少一个向目标推进的意图——没有在跑的 work 可等、也没有在排队的方向时，产出 0 意图=任务停摆；哪怕已知方向都只在 recent_done 里，也要按下面 done/exhausted/blocked 的判断另开一条或续派一条。
+- **确实无法推进时才允许 0 意图，且必须同时给出三项**：①用 record_planning_decision 登记 no_progress 决策；②写清缺失前提（缺哪份材料/哪项授权/哪个环境，谁提供，怎么恢复）；③说明该阻塞不在你自主可解决的范围内。只说"看起来没方向了/更稳妥起见先等"不构成理由。
+- **产出 0 个意图是正常结果，但要有正当理由**（不是"少派更稳"的默认）：①**已覆盖**——你想到的方向都已被仍在 open/running 的意图处理（换措辞重复生成已存在的意图是严重错误）；②**等待依赖**——下一步依赖当前在跑 work 的产出、而它还没出来（此时硬派会让下游拿不到前置而空转，应等下次唤醒图更新后再派）。注意：这两条都只在【已有 open/running 意图】时成立，不适用于硬底线条。
 - 反过来：确有【未覆盖、且不依赖在跑 work】的新方向，或目标未达成且范围内仍有未测面，就该派——别把 0 意图当偷懒的默认。
 
 **每次唤醒的决策流程**：
@@ -397,6 +398,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	if IsReverse(ctx) {
 		sysBody = reverseSystemKey(agentKey, "planner", goal, taskDir)
 	}
+	if IsCTF(ctx) {
+		sysBody += ctfOverlay("planner")
+	}
 	var constraintSnapshot []db.Constraint
 	refreshConstraints := p.wantConstraints()
 	if refreshConstraints {
@@ -474,10 +478,11 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		// 心跳/无变动唤醒时,若全图已无任何 open 或 running 意图 → 探索已停摆(没 worker 在跑、
 		// 也没排队方向)。明确告知 planner 并强制其本轮补出新方向,别只复查在跑意图后空转一轮。
 		if active, err := ts.HasActiveIntent(); err == nil && !active {
-			lead = "本轮是定时巡检，当前没有可执行意图。核对目标与证据；有新方向才派工，否则记录 waiting/no_progress、阻塞原因与恢复条件："
+			lead = "本轮是**定时巡检（心跳到点）**的唤醒，且当前**已没有任何 open 或 running 的意图**——没有 worker 在跑、也没有排队中的方向，探索已停摆。你**必须**在本轮产出一个或多个向目标推进、且与图中既有意图**互不重复**的新意图（不得产出 0 意图）；先据下面的态势判定目标是否已达成，未达成则立即补方向；只有阻塞来自缺少材料/授权/环境这类自主不可解决的前提时，才可以登记 no_progress 决策并写明恢复条件："
 		}
 	}
-	input := lead + situational + "\n\n据态势判断目标；只有可核对证据才可 prove_goal。无新方向时允许记录等待或无进展，禁止同义重派。" + renderPlannerTodos(opts.Todos.List())
+	input := lead + situational + "\n\n据上面的态势，判定目标。目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时用 prove_goal 逐个标记。**硬底线：只要目标尚未达成、且当前没有任何 open 或 running 意图（frontier_open=0 且 running_intents 为空），本轮就必须产出至少一个向目标推进的意图——此时没有在跑的 work 可等、也没有在排队的方向，产出 0 意图=任务停摆。仅当已有 open/running 意图在推进、或目标已达成时，本轮才可以不产出新意图。**" +
+		renderPlannerTodos(opts.Todos.List())
 	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
 	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。
 	_, _, err = captureRun(ctx, opts, input,

@@ -139,6 +139,9 @@ func DecomposeGoalsWithProviderConfig(ctx context.Context, prov llm.Provider, da
 	if IsReverse(ctx) {
 		sys = reverseSystemKey(agentKey, "goals", goalText, ensureRunDir(dataDir, taskID, 0))
 	}
+	if IsCTF(ctx) {
+		sys += ctfOverlay("goals")
+	}
 	// set_constraints 始终可用(不依赖 asset store):正文已含「先抽操作约束再拆目标」这步
 	// (可在 agent 编辑页改措辞),这里只需接上工具。
 	tools := []actool.CoreTool{tsx.setGoals(), tsx.setConstraints()}

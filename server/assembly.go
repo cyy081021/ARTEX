@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -22,7 +23,7 @@ import (
 // hostTools, if set, returns runtime host tools (currently the traffic tools when
 // capture is on) to add to EVERY agent's base list — the DB tools table then
 // filters them per-agent binding. Empty/nil → no host tools this run (capture off).
-func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string), workDirs ...string) {
+func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string), campaign func() *nativeCampaignService, workDirs ...string) {
 	workDir := filepath.Dir(skillDir)
 	if len(workDirs) > 0 {
 		workDir = workDirs[0]
@@ -31,22 +32,47 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 		var reverseExtra []actool.CoreTool
 		nativeRestricted := false
 		reverseCleanup := func() {}
+		// CTF mode's flag ledger. Built once for every path, filtered by mode and by
+		// the role's binding, so normal tasks never see the extra surface.
+		ctfExtra := []actool.CoreTool{}
+		if agent.IsCTF(ctx) {
+			if info := agent.RunInfoFrom(ctx); info.TaskID > 0 {
+				for _, t := range ctfFlagTools(pg, info.TaskID) {
+					if ctfFlagAllowed(agentKey, t.Name()) {
+						ctfExtra = append(ctfExtra, t)
+					}
+				}
+			}
+		}
 		if info := agent.RunInfoFrom(ctx); info.TaskID > 0 {
 			if task, err := pg.GetTask(info.TaskID); err == nil && task != nil && task.Kind == "reverse" {
-				reverseExtra, _, reverseCleanup = reverseAgentTools(ctx, pg, task, workDir, agentKey)
+				campaignSvc := campaignServiceOf(campaign)
+				reverseExtra, _, reverseCleanup = reverseAgentTools(ctx, pg, task, workDir, agentKey, campaignSvc)
+				if os.Getenv("ARTEX_TOOL_TRACE") == "1" {
+					// Tool wiring is otherwise invisible: a missing durable surface shows up
+					// only as a worker claiming the tool does not exist.
+					hasCampaign := false
+					for _, tool := range reverseExtra {
+						if tool.Name() == "native_campaign" {
+							hasCampaign = true
+						}
+					}
+					log.Printf("[tool trace] task=%d role=%s campaign_service=%v reverse_tools=%d native_campaign=%v",
+						info.TaskID, agentKey, campaignSvc != nil, len(reverseExtra), hasCampaign)
+				}
 				cfg, cfgErr := pg.NativeConfig(task.ID)
 				nativeRestricted = cfgErr != nil || cfg.Revision > 0
 			}
 		}
 		if nativeRestricted {
-			return reverseExtra, agent.DeferredInfo{NativeRestricted: true}, reverseCleanup
+			return append(append([]actool.CoreTool{}, reverseExtra...), ctfExtra...), agent.DeferredInfo{NativeRestricted: true}, reverseCleanup
 		}
 		a, err := pg.GetAgentByKey(agentKey)
 		if err != nil || a == nil {
 			reverseCleanup()
 			return nil, agent.DeferredInfo{}, nil
 		}
-		extra := reverseExtra
+		extra := append(append([]actool.CoreTool{}, reverseExtra...), ctfExtra...)
 
 		// --- skills: load visible skills into reg (used for the Skill meta-tool
 		// and to know which MCP servers are skill-gated). ---
@@ -442,4 +468,13 @@ func jsonStrMap(raw json.RawMessage) map[string]string {
 		_ = json.Unmarshal(raw, &out)
 	}
 	return out
+}
+
+// campaignServiceOf tolerates an unset accessor so tests and non-server callers can pass
+// nil instead of a closure.
+func campaignServiceOf(accessor func() *nativeCampaignService) *nativeCampaignService {
+	if accessor == nil {
+		return nil
+	}
+	return accessor()
 }

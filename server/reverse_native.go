@@ -217,6 +217,34 @@ func nativeSaveEvidence(dir string, taskID int64, a *db.ReverseArtifact, operati
 	return nativeSaveEvidenceWithAuthority(dir, taskID, a, operation, authority, o, transcript)
 }
 func (s *Server) reverseNativeRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/tasks/{id}/reverse/native/campaign", s.nativeCampaignHTTPAction)
+	mux.HandleFunc("GET /api/tasks/{id}/reverse/native/campaigns", s.nativeCampaignHTTPList)
+	mux.HandleFunc("GET /api/tasks/{id}/reverse/native/campaigns/{campaign_id}", s.nativeCampaignHTTPStatus)
+	mux.HandleFunc("GET /api/tasks/{id}/reverse/native/campaigns/{campaign_id}/manifest", s.nativeCampaignHTTPManifest)
+	// Detail readers: attempts and durable checkpoints. They make a paused or stalled
+	// campaign auditable from the UI without opening the database.
+	mux.HandleFunc("GET /api/tasks/{id}/reverse/native/campaigns/{campaign_id}/attempts", s.nativeCampaignHTTPAttempts)
+	mux.HandleFunc("GET /api/tasks/{id}/reverse/native/campaigns/{campaign_id}/checkpoints", s.nativeCampaignHTTPCheckpoints)
+	// Operator reconciliation for an attempt whose final frame was lost before the
+	// creation seal existed: releases the single worker slot after proving every
+	// planned resource is gone. It never creates or adopts anything.
+	mux.HandleFunc("POST /api/tasks/{id}/reverse/native/campaigns/{campaign_id}/reconcile", func(w http.ResponseWriter, r *http.Request) {
+		service, taskID, ok := s.nativeCampaignHTTPRead(w, r)
+		if !ok {
+			return
+		}
+		campaignID, err := nativeCampaignHTTPInteger(r.PathValue("campaign_id"), 1, 1<<63-1)
+		if err != nil {
+			nativeCampaignHTTPError(w, err)
+			return
+		}
+		result, err := service.settleUnsealedCleanup(r.Context(), taskID, campaignID)
+		if err != nil {
+			nativeCampaignHTTPError(w, err)
+			return
+		}
+		writeJSON(w, 200, result)
+	})
 	mux.HandleFunc("GET /api/findings/{id}/native-export", s.nativeExportRoute)
 	mux.HandleFunc("GET /api/findings/{id}/native-evidence", func(w http.ResponseWriter, r *http.Request) {
 		id, e := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -432,6 +460,9 @@ func nativeTools(pg *db.DB, task *db.Task, info agent.RunInfo, dir, role string,
 		}
 		return reverseJSON(map[string]any{"result_path": path, "artifact_sha256": artifact.SHA256, "observation": o}), nil
 	})}
+	// sandbox_exec is attached once, at the assembly site in reverseAgentTools,
+	// where every role that may execute an intent is known. Attaching it here as
+	// well produced two same-named tools in the same tool list.
 	if role != "reverse_dynamic" && role != "reverse_reviewer" && role != "worker" {
 		return tools
 	}

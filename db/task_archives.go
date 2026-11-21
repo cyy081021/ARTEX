@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	TaskArchiveFormatVersion       = 5
+	TaskArchiveFormatVersion       = 6
 	TaskArchiveLegacyFormatVersion = 1
 	TaskArchiveLLMRecordsPath      = "database/llm_records.ndjson"
 )
@@ -239,6 +239,14 @@ WHERE t.id=$1 AND t.deleted_at IS NULL FOR UPDATE OF t`, taskID).Scan(
 	if err != nil {
 		return nil, err
 	}
+	var campaignBusy bool
+	if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM native_campaign_attempts WHERE task_id=$1 AND (resource_hold OR state IN ('claimed','launching','running','stopping')))
+ OR EXISTS(SELECT 1 FROM native_campaigns WHERE task_id=$1 AND state IN ('running','stopping'))`, taskID).Scan(&campaignBusy); err != nil {
+		return nil, err
+	}
+	if campaignBusy {
+		return nil, fmt.Errorf("%w: campaign resources are not settled", ErrTaskArchiveIneligible)
+	}
 	if queued {
 		return nil, ErrTaskArchiveQueued
 	}
@@ -415,6 +423,9 @@ SET state=$2,phase='starting',progress=1,error='' WHERE id=$1 RETURNING `+taskAr
 }
 
 func (d *DB) UpdateTaskArchiveProgress(id int64, phase string, progress int) error {
+	if phase == "database_compacting" {
+		return fmt.Errorf("%w: reserved compaction phase", ErrTaskArchiveState)
+	}
 	if progress < 0 {
 		progress = 0
 	}
@@ -778,6 +789,15 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		{"reverse_native_configs", `SELECT * FROM reverse_native_configs WHERE task_id=$1`, []any{taskID}},
 		{"reverse_native_cases", `SELECT * FROM reverse_native_cases WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"reverse_native_runs", `SELECT * FROM reverse_native_runs WHERE task_id=$1 ORDER BY run_id`, []any{taskID}},
+		{"native_campaigns", `SELECT * FROM native_campaigns WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"native_campaign_attempts", `SELECT * FROM native_campaign_attempts WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"native_campaign_objects", `SELECT * FROM native_campaign_objects WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"native_campaign_corpus_manifests", `SELECT * FROM native_campaign_corpus_manifests WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"native_campaign_corpus_entries", `SELECT * FROM native_campaign_corpus_entries WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"native_campaign_checkpoints", `SELECT * FROM native_campaign_checkpoints WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"native_campaign_evidence", `SELECT * FROM native_campaign_evidence WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"native_campaign_requests", `SELECT * FROM native_campaign_requests WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"native_campaign_events", `SELECT * FROM native_campaign_events WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"explorations", `SELECT * FROM explorations WHERE id=$1`, []any{expID}},
 		{"exploration_nodes", `SELECT * FROM exploration_nodes WHERE exploration_id=$1 ORDER BY id`, []any{expID}},
 		{"exploration_edges", `SELECT * FROM exploration_edges WHERE exploration_id=$1 ORDER BY src_id,dst_id`, []any{expID}},

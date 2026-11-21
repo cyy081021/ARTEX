@@ -33,6 +33,7 @@ web/next-env.d.ts
 !/docs/team-onboarding-validation.md
 !/docs/team-member-detail-validation.md
 !/docs/team-auto-collaboration.md
+!/docs/native-campaign-ops.md
 
 # os
 .DS_Store
@@ -65,3 +66,7 @@ Thumbs.db
 /bench/
 /Dockerfile.bench
 /Dockerfile.bench.v2
+
+# 本地迁移/调试工作目录（工具链缓存、临时脚本、部署产物，不提交）
+/.tmp-upstream/
+web/.next-start.*.log

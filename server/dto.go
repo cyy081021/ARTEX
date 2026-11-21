@@ -54,6 +54,12 @@ type TaskDTO struct {
 	GoalsTotal         int                  `json:"goals_total"`
 	GoalsMet           int                  `json:"goals_met"`
 	InFlight           int                  `json:"in_flight"`                // 运行中 Worker 数（state=running 的意图）
+	OpenIntents        int                  `json:"open_intents"`             // 已规划未被认领（排队）的意图数
+	BlockedIntents     int                  `json:"blocked_intents"`          // 已报告阻塞的意图数
+	OldestOpenSeconds  int64                `json:"oldest_open_seconds"`      // 最久排队意图的等待秒数，0=无排队
+	OldestRunSeconds   int64                `json:"oldest_run_seconds"`       // 最久运行意图的已运行秒数，判断卡死
+	Mode               string               `json:"mode"`                     // normal | ctf
+	Flags              int                  `json:"flags"`                    // CTF 模式已捕获 flag 数
 	Findings           FindingSeverityDTO   `json:"findings"`                 // 该任务已登记的漏洞数（findings 表，按严重度分档）
 	LLMProfileID       *int64               `json:"llm_profile_id,omitempty"` // LLM profile used for this task; nil = default
 	LLMProfileIDs      []int64              `json:"llm_profile_ids"`

@@ -24,6 +24,9 @@ func (d *DB) CompleteTaskArchive(
 	if snapshot == nil || snapshot.FormatVersion != TaskArchiveFormatVersion {
 		return ErrTaskArchiveFormatMismatch
 	}
+	if err := validateNativeCampaignArchiveScope(snapshot); err != nil {
+		return fmt.Errorf("archive Campaign scope: %w", err)
+	}
 	countsRaw, err := json.Marshal(snapshot.DataCounts)
 	if err != nil {
 		return err
@@ -40,11 +43,8 @@ func (d *DB) CompleteTaskArchive(
 	if err := coordinateWithSchemaMigration(tx); err != nil {
 		return err
 	}
-	var taskID, expID int64
-	var state string
-	if err := tx.QueryRow(`SELECT archive.task_id,task.exploration_id,archive.state
-FROM task_archives archive JOIN tasks task ON task.id=archive.task_id
-WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID, &state); err != nil {
+	taskID, expID, state, err := lockTaskArchiveIdentityTx(tx, archiveID)
+	if err != nil {
 		return err
 	}
 	if state != Archiving || taskID != snapshot.TaskID || expID != snapshot.ExplorationID {
@@ -58,6 +58,9 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 		return fmt.Errorf("%w: task %d", ErrTaskArchiveDependent, dependent)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err := compactNativeCampaignArchiveTx(tx, archiveID, snapshot); err != nil {
 		return err
 	}
 	// Prevent task/asset ownership from changing while exclusivity is rechecked.
@@ -156,7 +159,7 @@ WHERE id=$1`, taskID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE task_archives SET
-	 state=$2,phase='ready',progress=100,error='',archive_path=$3,sha256=$4,
+	 state=$2,phase='ready',compaction_txid=NULL,progress=100,error='',archive_path=$3,sha256=$4,
 	 original_size=$5,compressed_size=$6,data_counts=$7,aggregate_stats=$8,
 	 format_version=$9,archived_at=now(),warnings='[]'
 WHERE id=$1`, archiveID, ArchiveReady, archivePath, sha256, originalSize, compressedSize,
@@ -205,6 +208,9 @@ func (d *DB) restoreTaskArchive(
 	if streamedLLMRecords != "" && llmRecords == nil {
 		return nil, fmt.Errorf("%w: streamed LLM records are missing", ErrTaskArchiveFormatMismatch)
 	}
+	if err := validateNativeCampaignArchiveScope(snapshot); err != nil {
+		return nil, fmt.Errorf("restore Campaign scope: %w", err)
+	}
 	if err := validateNativeArchiveScope(snapshot); err != nil {
 		return nil, fmt.Errorf("restore native scope: %w", err)
 	}
@@ -216,11 +222,8 @@ func (d *DB) restoreTaskArchive(
 	if err := coordinateWithSchemaMigration(tx); err != nil {
 		return nil, err
 	}
-	var taskID, expID int64
-	var state string
-	if err := tx.QueryRow(`SELECT archive.task_id,task.exploration_id,archive.state
-FROM task_archives archive JOIN tasks task ON task.id=archive.task_id
-WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID, &state); err != nil {
+	taskID, expID, state, err := lockTaskArchiveIdentityTx(tx, archiveID)
+	if err != nil {
 		return nil, err
 	}
 	if state != Restoring || taskID != snapshot.TaskID || expID != snapshot.ExplorationID {
@@ -283,6 +286,9 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
+	}
+	if err := restoreNativeCampaignArchiveTx(tx, snapshot); err != nil {
+		return nil, fmt.Errorf("restore Campaign graph: %w", err)
 	}
 	// Restoring an archive never silently re-grants execution on a new host.
 	if _, err := tx.Exec(`UPDATE reverse_runtime_policies SET enabled=false WHERE task_id=$1`, taskID); err != nil {
@@ -476,6 +482,9 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 		"reverse_runtime_policies": true, "reverse_runtime_runs": true,
 		"reverse_native_configs": true, "reverse_native_cases": true, "reverse_native_runs": true,
 		"finding_native_evidence": true,
+		"native_campaigns":        true, "native_campaign_attempts": true, "native_campaign_objects": true,
+		"native_campaign_corpus_manifests": true, "native_campaign_corpus_entries": true,
+		"native_campaign_checkpoints": true, "native_campaign_evidence": true, "native_campaign_requests": true, "native_campaign_events": true,
 	}
 	if !allowed[table] {
 		return fmt.Errorf("archive restore table %q is not allowed", table)
@@ -830,11 +839,8 @@ func (d *DB) DeleteTaskArchiveStub(archiveID int64) error {
 	if err := coordinateWithSchemaMigration(tx); err != nil {
 		return err
 	}
-	var taskID, expID int64
-	var state string
-	if err := tx.QueryRow(`SELECT archive.task_id,task.exploration_id,archive.state
-FROM task_archives archive JOIN tasks task ON task.id=archive.task_id
-WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID, &state); err != nil {
+	taskID, expID, state, err := lockTaskArchiveIdentityTx(tx, archiveID)
+	if err != nil {
 		return err
 	}
 	if state != Deleting {

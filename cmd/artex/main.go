@@ -1,13 +1,16 @@
-// Command artex runs the ARTEX backend: the dual SQLite graph stores,
+﻿// Command artex runs the ARTEX backend: the dual SQLite graph stores,
 // the event-driven exploration engine, and the JSON HTTP API consumed by the
 // shadcn/ui frontend.
 package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -28,6 +31,11 @@ import (
 // -ldflags "-X main.version=<tag>". Defaults to "dev" for local builds.
 var version = "dev"
 
+// buildCommitSHA is injected at release time: -ldflags "-X main.buildCommitSHA=<sha>".
+var buildCommitSHA = ""
+
+func buildCommit() string { return buildCommitSHA }
+
 const banner = `
     _    ____ _____ _______  __
    / \  |  _ \_   _| ____\ \/ /
@@ -42,6 +50,32 @@ func printBanner(addr string) {
 	fmt.Println("  AI 自主渗透测试系统")
 	fmt.Printf("  版本 %s  ·  %s/%s  ·  %s  ·  监听 %s\n\n",
 		version, runtime.GOOS, runtime.GOARCH, runtime.Version(), addr)
+}
+
+// buildIdentity identifies the exact bytes this process is running. Without it a
+// verification run cannot tell a fresh binary from a stale one: the deployment
+// script used to copy silently, so an old binary could keep serving while every
+// check looked at the new source tree.
+func buildIdentity() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "unknown"
+	}
+	f, err := os.Open(exe)
+	if err != nil {
+		return exe
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return exe
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+	commit := buildCommit()
+	if commit == "" {
+		commit = "dev"
+	}
+	return fmt.Sprintf("%s sha256=%s commit=%s", exe, sum, commit)
 }
 
 // main only maps run's result onto the process exit code. The exit code is part
@@ -181,6 +215,7 @@ func run() int {
 
 	go func() {
 		log.Printf("ARTEX %s backend listening on %s (data=%s, workers=%d)", version, *addr, *dataDir, mgr.Workers())
+	log.Printf("[build] %s", buildIdentity())
 		serve := httpSrv.ListenAndServe
 		if *tlsCert != "" && *teamAddr == "" {
 			serve = func() error { return httpSrv.ListenAndServeTLS("", "") }

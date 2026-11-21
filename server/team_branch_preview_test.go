@@ -48,7 +48,9 @@ func TestBranchBrowserPreview(t *testing.T) {
 	t.Cleanup(func() { _, _ = pg.Exec(`DELETE FROM teams WHERE id=$1`, team.ID) })
 	tokens := map[string]string{}
 	var owner int64
-	if _,err=pg.Exec(`INSERT INTO team_tasks(team_id,task_id) VALUES($1,$2)`,team.ID,tid);err!=nil{t.Fatal(err)}
+	if _, err = pg.Exec(`INSERT INTO team_tasks(team_id,task_id) VALUES($1,$2)`, team.ID, tid); err != nil {
+		t.Fatal(err)
+	}
 	policy := collab.BranchPolicy{Version: 1, Goal: "仅验证本机隔离协作流程，不执行任何真实目标", Budget: 200, MaxToolSeconds: 30, Kinds: []string{"pentest", "reverse"}, Assets: []collab.BranchAsset{{ID: "fixture", Target: "https://owned.invalid", Version: "v1"}}, PlannerPrompts: map[string]string{"pentest": "fixture planner", "reverse": "fixture reverse planner"}, Roles: map[string]collab.ExecutionConfig{}}
 	for _, role := range []string{"worker", "reviewer", "reverse_static", "reverse_reviewer", "reverse_dynamic"} {
 		kind := "pentest"

@@ -44,7 +44,7 @@ func reverseToolDefaults(pg *db.DB, dir string) []agent.ToolSeed {
 		}
 		seeds = append(seeds, agent.ToolSeed{Key: reverseToolPrefix + t.Name(), Desc: t.Description(), Schema: t.InputSchema(), Agents: []string{"reverse_main", "reverse_planner", "reverse_static", "reverse_dynamic", "reverse_reviewer"}})
 	}
-	tools, _, close := reverseAgentTools(context.Background(), pg, &db.Task{}, dir, "worker")
+	tools, _, close := reverseAgentTools(context.Background(), pg, &db.Task{}, dir, "worker", nil)
 	defer close()
 	for _, t := range tools {
 		roles := []string{"reverse_static", "reverse_dynamic", "reverse_reviewer"}
@@ -70,6 +70,20 @@ func reverseToolDefaults(pg *db.DB, dir string) []agent.ToolSeed {
 	// fuzz action is only authorized for the dynamic role and is seeded here.
 	fuzz := nativeFuzzTool(pg, &db.Task{}, agent.RunInfo{}, dir)
 	seeds = append(seeds, agent.ToolSeed{Key: reverseToolPrefix + fuzz.Name(), Desc: fuzz.Description(), Schema: fuzz.InputSchema(), Agents: []string{"reverse_dynamic"}})
+	// The durable campaign tool is mounted next to native_fuzz for the same role, so it
+	// needs its own binding row for ToolResolve to keep it.
+	campaignSeed := nativeCampaignTool(nil, &db.Task{}, agent.RunInfo{})
+	seeds = append(seeds, agent.ToolSeed{Key: reverseToolPrefix + campaignSeed.Name(), Desc: campaignSeed.Description(), Schema: campaignSeed.InputSchema(), Agents: []string{"reverse_dynamic"}})
+	// sandbox_exec is built outside the worker enumeration above (it lives in
+	// nativeTools behind a role switch), so without an explicit seed row the DB
+	// has no binding and ToolResolve drops it for every reverse role.
+	execTool := reverseExecTool(&db.Task{}, agent.RunInfo{}, dir, "reverse_static")
+	seeds = append(seeds, agent.ToolSeed{Key: reverseToolPrefix + execTool.Name(), Desc: execTool.Description(), Schema: execTool.InputSchema(), Agents: []string{"reverse_static", "reverse_dynamic", "reverse_reviewer"}})
+	// CTF 模式的 flag 台账工具同样由 ToolAugment 提供；逆向任务只在 CTF 模式下追加，
+	// 但没有 DB 行时 ToolResolve 会把未知名字丢掉，所以这里必须显式 seed。
+	for _, t := range ctfFlagTools(nil, 0) {
+		seeds = append(seeds, agent.ToolSeed{Key: reverseToolPrefix + t.Name(), Desc: t.Description(), Schema: t.InputSchema(), Agents: []string{"reverse_static", "reverse_dynamic", "reverse_reviewer"}})
+	}
 	return seeds
 }
 
@@ -78,6 +92,11 @@ func seedReverseRoles(pg *db.DB, dir string) error {
 		schema, _ := json.Marshal(sd.Schema)
 		binds, _ := json.Marshal(sd.Agents)
 		if err := pg.SeedTool(sd.Key, sd.Desc, schema, binds); err != nil {
+			return err
+		}
+		// A row created before this tool existed, or created by hand, may carry an
+		// empty agent list, which silently hides the tool from every reverse role.
+		if err := pg.EnsureToolAgents(sd.Key, binds); err != nil {
 			return err
 		}
 		if sd.Key == reverseToolPrefix+"complete_intent" {
@@ -131,9 +150,11 @@ func permittedReverseRoleTool(key, name string) bool {
 		return key == "reverse_static" || key == "reverse_dynamic"
 	case "reverse_review_conclusion", "native_review", "native_publish_finding":
 		return key == "reverse_reviewer"
-	case "native_fuzz":
+	case "native_fuzz", "native_campaign":
 		return key == "reverse_dynamic"
 	case "native_inspect":
+		return key == "reverse_static" || key == "reverse_dynamic" || key == "reverse_reviewer"
+	case "sandbox_exec":
 		return key == "reverse_static" || key == "reverse_dynamic" || key == "reverse_reviewer"
 	case "native_session", "native_case", "reverse_observe_runtime", "reverse_runtime_session", "reverse_browser_scenario":
 		return key == "reverse_dynamic" || key == "reverse_reviewer"

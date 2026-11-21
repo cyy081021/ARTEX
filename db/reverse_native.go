@@ -12,6 +12,11 @@ import (
 	"time"
 )
 
+// NativeModeCampaign is the ledger mode reserved for Campaign Attempts. It is
+// intentionally separate from the legacy exec/debug/replay/fuzz modes: the old
+// NativeRuns window filters it out, while NativeCampaignRuns reads only it.
+const NativeModeCampaign = "campaign"
+
 // Native modes change the evidence workflow, never the execution authorization.
 type NativeConfig struct {
 	Mode     string `json:"mode"`
@@ -224,9 +229,53 @@ func (d *DB) FinishNativeRun(runID int64, state, path string, raw []byte) error 
 	_, e := d.Exec(`UPDATE reverse_native_runs SET target_state=$2,result_path=$3,observation=$4 WHERE run_id=$1`, runID, state, path, raw)
 	return e
 }
+
+// NativeRuns is the legacy 100-row window. Campaign ledger rows must not
+// consume that window: callers use NativeCampaignRuns for the Campaign view.
 func (d *DB) NativeRuns(taskID int64) ([]NativeRun, error) {
 	out := []NativeRun{}
-	rows, e := d.Query(`SELECT row_to_json(n) FROM reverse_native_runs n WHERE task_id=$1 ORDER BY run_id DESC LIMIT 100`, taskID)
+	rows, e := d.Query(`SELECT row_to_json(n) FROM reverse_native_runs n
+		WHERE task_id=$1 AND mode <> $2 ORDER BY run_id DESC LIMIT 100`,
+		taskID, NativeModeCampaign)
+	if e != nil {
+		return out, e
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		var r NativeRun
+		if e = rows.Scan(&raw); e != nil {
+			return nil, e
+		}
+		if e = json.Unmarshal(raw, &r); e != nil {
+			return nil, e
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// NativeCampaignRuns returns only Campaign ledger rows for one task. The window
+// is bounded and cursor-based so a task with many attempts cannot force an
+// unbounded read. beforeID<=0 starts at the newest row.
+func (d *DB) NativeCampaignRuns(taskID int64, limit int, beforeID int64) ([]NativeRun, error) {
+	if _, e := d.reverseTask(taskID); e != nil {
+		return nil, e
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if beforeID < 0 {
+		beforeID = 0
+	}
+	out := []NativeRun{}
+	rows, e := d.Query(`SELECT row_to_json(n) FROM reverse_native_runs n
+		WHERE task_id=$1 AND mode=$2 AND ($3=0 OR run_id < $3)
+		ORDER BY run_id DESC LIMIT $4`,
+		taskID, NativeModeCampaign, beforeID, limit)
 	if e != nil {
 		return out, e
 	}

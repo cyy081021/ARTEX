@@ -30,8 +30,8 @@ func TestReverseWorkflowPolicies(t *testing.T) {
 	}
 	for _, role := range []string{"planner", "worker", "mainagent", "goals"} {
 		system := reverseSystem(role, "解释本地编码过程", "/tmp/sample")
-		if !strings.Contains(system, "逆向") || !strings.Contains(system, "不要求发现漏洞") || !strings.Contains(system, "reverse_review_conclusion") {
-			t.Fatalf("missing reverse evidence policy for %s", role)
+		if !strings.Contains(system, "漏洞") || !strings.Contains(system, "独立核验") || !strings.Contains(system, "reverse_review_conclusion") {
+			t.Fatalf("missing software exploration policy for %s", role)
 		}
 	}
 }

@@ -28,6 +28,12 @@ export interface Task {
   queued?: boolean;
   active?: boolean;
   in_flight?: number;
+  open_intents?: number; // 已规划未被认领(排队)的意图数
+  blocked_intents?: number; // 已报告阻塞的意图数
+  oldest_open_seconds?: number; // 最久排队意图的等待秒数,0/undef=无排队
+  oldest_run_seconds?: number; // 最久运行意图的已运行秒数,用于发现卡死
+  mode?: "normal" | "ctf"; // 任务模式:normal=常规渗透/逆向, ctf=比赛模式(flag 优先)
+  flags?: number; // CTF 模式已捕获 flag 数
   findings?: { critical: number; high: number; medium: number; low: number }; // 已登记漏洞数(按严重度分档)
   last_activity?: string;
   stalled?: boolean;
@@ -47,6 +53,76 @@ export interface Task {
 }
 
 export interface ReverseArtifact { id: number; task_id: number; name: string; format: string; size_bytes: number; sha256: string; source: string; version: string; created_at: string }
+
+/** CTF 模式捕获的 flag（任务级台账，按值去重）。 */
+export interface TaskFlag {
+  id: number;
+  task_id: number;
+  intent_id?: number;
+  value: string;
+  sha256: string;
+  source: string;
+  note: string;
+  created_at: string;
+}
+
+/** 跨任务 flag 看板的一行：flag + 它来自哪个任务。 */
+export interface TaskFlagRow extends TaskFlag {
+  task_name: string;
+  task_mode: string;
+}
+
+/** Native 模糊测试战役（campaign）列表行。 */
+export interface CampaignRow {
+  id: number;
+  artifact_id: number;
+  state: string;
+  desired_state: string;
+  state_version: number;
+  spec_hash: string;
+  total_budget_ms: number;
+  charged_budget_ms: number;
+  current_attempt_id?: number | null;
+  latest_checkpoint_id?: number | null;
+  cleanup_status: string;
+  updated_at: string;
+}
+
+/** 战役下的一次尝试（attempt）。 */
+export interface CampaignAttemptRow {
+  id: number;
+  attempt_no: number;
+  state: string;
+  phase: string;
+  worker_slot: string;
+  lease_owner: string;
+  resource_hold: boolean;
+  hold_reason?: string | null;
+  reserved_budget_ms: number;
+  charged_budget_ms: number;
+  actual_elapsed_ms: number;
+  cleanup_status: string;
+  checkpoint_id?: number | null;
+  termination_reason?: string | null;
+  budget_overrun: boolean;
+  started_at?: string | null;
+  ended_at?: string | null;
+  created_at: string;
+}
+
+/** 一次尝试产出的持久化语料检查点。 */
+export interface CampaignCheckpointRow {
+  id: number;
+  attempt_id: number;
+  state: string;
+  format_version: number;
+  entry_count: number;
+  total_bytes: number;
+  manifest_id: number;
+  truncated: boolean;
+  created_at: string;
+  verified_at?: string | null;
+}
 export interface ReverseEvidence { artifact_id: number; locator: string; observation: string; result_path?: string }
 export interface ReverseConclusion { id: number; task_id: number; intent_id: number; node_id?: string; question: string; answer: string; state: "proposed" | "accepted" | "rejected" | "unresolved"; evidence: ReverseEvidence[]; limitations: string; reviewer_intent_id?: number; review: string; created_at: string; reviewed_at?: string }
 export interface ReverseReadiness { available: boolean; command: string; version: string; tool_count: number; formats: string[]; limitations: string[]; engines: { id: string; name: string; available: boolean; reason?: string }[]; error?: string }

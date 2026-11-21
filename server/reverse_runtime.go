@@ -280,7 +280,7 @@ func verifyArtifact(a *db.ReverseArtifact) error {
 
 // reverseAgentTools replaces the pentest skill/MCP augmentation for reverse
 // tasks. The REA process is lazy, private to this run and killed on cleanup.
-func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, role string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
+func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, role string, campaign *nativeCampaignService) ([]actool.CoreTool, agent.DeferredInfo, func()) {
 	info := agent.RunInfoFrom(ctx)
 	taskDir := filepath.Join(workDir, "tasks", strconv.FormatInt(task.ID, 10), "reverse")
 	resultDir := filepath.Join(taskDir, "results")
@@ -517,6 +517,23 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 			return call(callCtx, name, args)
 		}))
 		tools = append(tools, nativeTools(pg, task, info, workDir, role, native)...)
+		// Durable campaigns are an additive surface next to the synchronous
+		// native_fuzz path: the fuzzing role gains a state machine it can pause,
+		// resume and audit, and keeps the one-shot tool as its fallback.
+		if campaign != nil && role == "reverse_dynamic" {
+			tools = append(tools, nativeCampaignTool(campaign, task, info))
+		}
+		// Attach the static command runner here, at the assembly site, so it cannot
+		// be lost to a role-name mismatch inside nativeTools: any role that may
+		// execute intents needs it, and the reviewer gets the read-only subset.
+		switch role {
+		case "worker", "reverse_static", "reverse_dynamic", "reverse_reviewer":
+			execRole := role
+			if role == "worker" {
+				execRole = "reverse_static"
+			}
+			tools = append(tools, reverseExecTool(task, info, workDir, execRole))
+		}
 		tools = append(tools, reverseConclusionTools(pg, task, info, workDir)...)
 		tools = append(tools, reverseDebugTool(pg, task, info, workDir))
 		tools = append(tools, sessions.tool(), reverseBrowserTool(pg, task, info, workDir))
@@ -530,8 +547,15 @@ func reverseAgentTools(ctx context.Context, pg *db.DB, task *db.Task, workDir, r
 		}
 	}
 	permitted := tools[:0]
+	seenTool := make(map[string]bool, len(tools))
 	for _, t := range tools {
+		// A duplicated name makes the provider reject or silently shadow one of
+		// them; keep the first (most specific) definition deterministically.
+		if seenTool[t.Name()] {
+			continue
+		}
 		if permittedReverseRoleTool(role, t.Name()) {
+			seenTool[t.Name()] = true
 			permitted = append(permitted, t)
 		}
 	}

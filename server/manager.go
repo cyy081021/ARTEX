@@ -29,6 +29,8 @@ import (
 type Task struct {
 	ID              string `json:"id"`
 	Kind            string `json:"kind"`
+	// Mode is "normal" or "ctf"; it never changes Kind, only the working policy.
+	Mode            string `json:"mode"`
 	WorkflowVersion int    `json:"workflow_version"`
 	ExpID           int64  `json:"exploration_id"`
 	Name            string `json:"name"` // 可选任务名称;空=未命名
@@ -832,7 +834,7 @@ func unixNanoOrZero(t *time.Time) int64 {
 
 func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Interceptor) *Task {
 	return &Task{
-		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID, Kind: pt.Kind, WorkflowVersion: pt.WorkflowVersion,
+		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID, Kind: pt.Kind, Mode: pt.Mode, WorkflowVersion: pt.WorkflowVersion,
 		Name:       pt.Name,
 		CategoryID: cloneInt64Ptr(pt.CategoryID), CategoryName: pt.CategoryName,
 		PinnedAt:    unixOrZero(pt.PinnedAt),

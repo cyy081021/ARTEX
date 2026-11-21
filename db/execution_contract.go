@@ -503,6 +503,15 @@ func (s *ExplorationStore) FinishIntentAttempt(ctx context.Context, id, attempt 
 	return state, tx.Commit()
 }
 
+// IntentSettlement reads back why an intent settled. Callers use it to tell the
+// operator what actually happened instead of one generic "not accepted" line:
+// the settlement reason is already persisted by FinishIntentAttempt, and the
+// worker's own blocker text lives in the contract payload.
+func (s *ExplorationStore) IntentSettlement(ctx context.Context, id int64) (reason, blocker string) {
+	_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(blocked_reason,''), COALESCE(payload->'execution_result'->>'blocker','') FROM exploration_nodes WHERE exploration_id=$1 AND id=$2`, s.expID, id).Scan(&reason, &blocker)
+	return reason, blocker
+}
+
 // ProveGoal commits proof, reason and goal transition together. Graph evidence
 // must have been read at this exact content version; semantic quality still needs review.
 func (s *ExplorationStore) ProveGoal(ctx context.Context, goal int64, ref EvidenceReference, reason, goalVersion string) (bool, error) {

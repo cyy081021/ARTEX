@@ -55,6 +55,9 @@ func TestFindingTrafficLegacyArchiveDefaults(t *testing.T) {
 				t.Fatal(err)
 			}
 			snapshot.FormatVersion = version
+			if version < TaskArchiveFormatVersion {
+				stripNativeCampaignArchiveTables(snapshot)
+			}
 			delete(snapshot.Tables, "finding_traffic_bindings")
 			delete(snapshot.Tables, "traffic_evidence_snapshots")
 			var rows []map[string]any

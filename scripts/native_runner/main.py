@@ -18,7 +18,7 @@ from .elf import elf_file_offset
 from .gdb_mi import (MIReader, command as gdb_command, parse_record, result_record,
                      running_record, stop_values)
 from .process import ByteReader, OutputBudget, write_bounded
-from .protocol import MAX_IO, PROTOCOL_VERSION, encode, read_frame, write_frame
+from .protocol import MAX_FRAME, MAX_IO, PROTOCOL_VERSION, encode, read_frame, write_frame
 from .sandbox import DockerSandbox, docker_environment, validate_argv
 
 MAX_STREAM = 16 * 1024 * 1024
@@ -606,9 +606,23 @@ def doctor(docker="docker", profile=None, run=subprocess.run):
     return result
 
 
+def _read_serve_first(inp):
+    """Legacy first-frame framing, retaining the raw line for strict campaign decode."""
+    line = inp.readline(MAX_FRAME + 1)
+    if not line:
+        return None, None
+    newline = b"\n" if isinstance(line, bytes) else "\n"
+    if len(line) > MAX_FRAME or not line.endswith(newline):
+        raise ValueError("protocol frame exceeds 1048576 bytes or is unterminated")
+    value = json.loads(line)
+    if not isinstance(value, dict):
+        raise ValueError("frame must be a JSON object")
+    return value, line
+
+
 def serve(inp=sys.stdin, out=sys.stdout, sandbox=None):
     sandbox = sandbox or DockerSandbox()
-    first = read_frame(inp)
+    first, first_raw = _read_serve_first(inp)
     if first is None:
         return 0
     event_seq = 0
@@ -623,6 +637,12 @@ def serve(inp=sys.stdin, out=sys.stdout, sandbox=None):
     if operation == "fuzz":
         from .fuzz import serve_fuzz
         return serve_fuzz(first, inp, emit)
+    if operation == "campaign":
+        from .campaign import serve_campaign
+        return serve_campaign(first, inp, emit, first_raw=first_raw)
+    if operation == "campaign_cleanup_probe":
+        from .campaign import serve_cleanup_probe
+        return serve_cleanup_probe(first, emit, first_raw=first_raw)
     if operation == "doctor":
         emit({"request_id": first.get("request_id", "doctor"), "kind": "result",
               "observation": doctor(profile=first.get("profile"))})

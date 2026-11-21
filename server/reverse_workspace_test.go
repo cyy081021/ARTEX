@@ -38,7 +38,7 @@ func TestReverseWorkspaceExposesGrantedRuntimeCapabilitiesOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ARTEX_REVERSE_RUNTIME_PROFILES", config)
-	tools, _, close := reverseAgentTools(context.Background(), m.pg, task, m.dir, "planner")
+	tools, _, close := reverseAgentTools(context.Background(), m.pg, task, m.dir, "planner", nil)
 	defer close()
 	answer := workflowCall(t, context.Background(), workflowTool(t, tools, "reverse_workspace"), map[string]any{}, false)
 	for _, secret := range []string{"private-runner-path", "private-bridge-path", "private-token", "ungranted"} {

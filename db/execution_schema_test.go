@@ -37,3 +37,38 @@ func TestExecutionToolSchemaUpgradePreservesSettings(t *testing.T) {
 		t.Fatal(string(row.Schema))
 	}
 }
+
+func TestEnsureToolAgentsRepairsOnlyEmptyBindings(t *testing.T) {
+	d, _, _ := executionFixture(t)
+	for _, key := range []string{"agents-empty-fixture", "agents-bound-fixture"} {
+		_, _ = d.Exec(`DELETE FROM tools WHERE key=$1`, key)
+		defer d.Exec(`DELETE FROM tools WHERE key=$1`, key)
+	}
+	if err := d.SeedTool("agents-empty-fixture", "empty", nil, json.RawMessage(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SeedTool("agents-bound-fixture", "bound", nil, json.RawMessage(`["reverse_dynamic"]`)); err != nil {
+		t.Fatal(err)
+	}
+	want := json.RawMessage(`["reverse_static","reverse_dynamic","reverse_reviewer"]`)
+	if err := d.EnsureToolAgents("agents-empty-fixture", want); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.EnsureToolAgents("agents-bound-fixture", want); err != nil {
+		t.Fatal(err)
+	}
+	empty, err := d.GetTool("agents-empty-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty.Agents) != 3 {
+		t.Fatalf("empty binding was not repaired: %+v", empty.Agents)
+	}
+	bound, err := d.GetTool("agents-bound-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bound.Agents) != 1 || bound.Agents[0] != "reverse_dynamic" {
+		t.Fatalf("operator binding was overwritten: %+v", bound.Agents)
+	}
+}

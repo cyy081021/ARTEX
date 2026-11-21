@@ -655,6 +655,7 @@ CREATE TABLE IF NOT EXISTS task_archives (
     updated_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE task_archives ALTER COLUMN format_version SET DEFAULT 2;
+ALTER TABLE task_archives ADD COLUMN IF NOT EXISTS compaction_txid bigint;
 CREATE INDEX IF NOT EXISTS idx_task_archives_state ON task_archives(state, requested_at, id);
 CREATE INDEX IF NOT EXISTS idx_task_archives_archived ON task_archives(archived_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_task_archives_sources ON task_archives USING GIN(source_task_ids);
@@ -1503,6 +1504,11 @@ CREATE TABLE IF NOT EXISTS reverse_runtime_runs (
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_reverse_runtime_runs_task ON reverse_runtime_runs(task_id,id DESC);
+-- Campaign attempts pause and resume the same runtime ledger, and a recovery sweep may
+-- mark a run interrupted; the original four-value check cannot express either state.
+ALTER TABLE reverse_runtime_runs DROP CONSTRAINT IF EXISTS reverse_runtime_runs_status_check;
+ALTER TABLE reverse_runtime_runs ADD CONSTRAINT reverse_runtime_runs_status_check
+  CHECK(status IN ('running','completed','failed','cancelled','interrupted','paused'));
 
 -- Narrow, durable handoff records between opposite workflow task kinds.
 CREATE TABLE IF NOT EXISTS workflow_requests (
@@ -1751,4 +1757,827 @@ ALTER TABLE reverse_native_cases ADD CONSTRAINT reverse_native_cases_assertion_c
 -- and recreate it so fuzz campaigns can use the same immutable runtime ledger.
 ALTER TABLE reverse_native_runs DROP CONSTRAINT IF EXISTS reverse_native_runs_mode_check;
 ALTER TABLE reverse_native_runs ADD CONSTRAINT reverse_native_runs_mode_check
-  CHECK (mode IN ('exec','debug','replay','fuzz'));
+  CHECK (mode IN ('exec','debug','replay','fuzz','campaign'));
+
+-- CTF mode: captured flags are their own ledger so the planner, the operator and
+-- the task view can see the only deliverable of a competition task. Dedupe is by
+-- digest, so a repeated submission is reported as a duplicate instead of failing.
+CREATE TABLE IF NOT EXISTS task_flags (
+  id BIGSERIAL PRIMARY KEY,
+  task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  intent_id BIGINT NOT NULL DEFAULT 0,
+  flag_sha256 TEXT NOT NULL,
+  value TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (task_id, flag_sha256)
+);
+
+-- Existing databases: add the task mode without rewriting the table.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'normal';
+
+-- ==== campaign prerequisites (must precede the campaign DDL) ====
+-- A Campaign must not point at an artifact of another task, nor silently disagree
+-- with the recorded digest; an Attempt must bind runs that belong to its own task.
+CREATE UNIQUE INDEX IF NOT EXISTS reverse_artifacts_id_task_uq
+  ON reverse_artifacts(id, task_id);
+CREATE UNIQUE INDEX IF NOT EXISTS reverse_artifacts_id_task_sha_uq
+  ON reverse_artifacts(id, task_id, sha256);
+CREATE UNIQUE INDEX IF NOT EXISTS reverse_runtime_runs_id_task_uq
+  ON reverse_runtime_runs(id, task_id);
+CREATE UNIQUE INDEX IF NOT EXISTS reverse_native_runs_id_task_uq
+  ON reverse_native_runs(run_id, task_id);
+
+-- ==== ported from the reference tree: native campaign v1 ====
+-- Generated: tables, indexes, constraints, guards and functions are copied verbatim.
+
+CREATE SEQUENCE IF NOT EXISTS native_campaign_fence_seq;
+
+-- ---------------------------------------------------------------------------
+-- Campaign. The spec/identity columns are immutable; image_id is filled by the
+-- first Attempt and must match on resume.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS native_campaigns (
+  id bigserial PRIMARY KEY,
+  task_id bigint NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  artifact_id bigint NOT NULL,
+  creator_kind text NOT NULL DEFAULT 'admin'
+    CHECK (creator_kind IN ('admin','intent')),
+  creator_id bigint NOT NULL DEFAULT 0 CHECK (creator_id >= 0),
+  spec_version integer NOT NULL DEFAULT 1 CHECK (spec_version = 1),
+  spec jsonb NOT NULL,
+  spec_hash text NOT NULL CHECK (spec_hash ~ '^[0-9a-f]{64}$'),
+  artifact_sha256 text NOT NULL CHECK (artifact_sha256 ~ '^[0-9a-f]{64}$'),
+  profile_id text NOT NULL CHECK (length(profile_id) BETWEEN 1 AND 64),
+  image_digest text NOT NULL CHECK (length(image_digest) BETWEEN 1 AND 512),
+  image_id text CHECK (image_id IS NULL OR image_id = '' OR image_id ~ '^sha256:[0-9a-f]{64}$'),
+  policy_revision bigint NOT NULL CHECK (policy_revision >= 1),
+  config_revision bigint NOT NULL CHECK (config_revision >= 1),
+  state text NOT NULL DEFAULT 'draft' CHECK (state IN
+    ('draft','queued','running','stopping','paused','completed','failed','cancelled','interrupted')),
+  desired_state text NOT NULL DEFAULT 'none' CHECK (desired_state IN
+    ('none','queued','running','paused','cancelled')),
+  state_version bigint NOT NULL DEFAULT 1 CHECK (state_version > 0),
+  total_budget_ms bigint NOT NULL CHECK (total_budget_ms BETWEEN 6000 AND 86400000),
+  charged_budget_ms bigint NOT NULL DEFAULT 0
+    CHECK (charged_budget_ms >= 0 AND charged_budget_ms <= total_budget_ms),
+  current_attempt_id bigint,
+  latest_checkpoint_id bigint,
+  cleanup_status text NOT NULL DEFAULT 'not_required'
+    CHECK (cleanup_status IN ('not_required','pending','verified','unknown','failed')),
+  pause_origin text NOT NULL DEFAULT 'none'
+    CHECK (pause_origin IN ('none','queued','running')),
+  termination_reason text CHECK (termination_reason IS NULL OR length(termination_reason) <= 128),
+  last_error_code text CHECK (last_error_code IS NULL OR length(last_error_code) <= 64),
+  last_error_message text CHECK (last_error_message IS NULL OR length(last_error_message) <= 512),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  started_at timestamptz,
+  ended_at timestamptz,
+  CHECK (jsonb_typeof(spec) = 'object'
+     AND octet_length(spec::text) BETWEEN 2 AND 262144),
+  CHECK ((creator_kind = 'admin' AND creator_id = 0)
+      OR (creator_kind = 'intent' AND creator_id > 0)),
+  CHECK (state <> 'completed' OR cleanup_status = 'verified'),
+  CHECK (state <> 'cancelled' OR cleanup_status IN ('verified','not_required')),
+  CHECK (state <> 'paused' OR (
+    (current_attempt_id IS NOT NULL
+      AND latest_checkpoint_id IS NOT NULL AND cleanup_status = 'verified')
+    OR
+    (pause_origin = 'queued' AND current_attempt_id IS NULL
+      AND latest_checkpoint_id IS NULL AND cleanup_status = 'not_required')
+  )),
+  UNIQUE (id, task_id),
+  -- The artifact hash is part of the ownership key: a Campaign cannot point at
+  -- an artifact of another task or silently disagree with the recorded digest.
+  FOREIGN KEY (artifact_id, task_id, artifact_sha256)
+    REFERENCES reverse_artifacts(id, task_id, sha256)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED
+);
+
+DROP TRIGGER IF EXISTS trg_native_campaigns_upd ON native_campaigns;
+
+CREATE TRIGGER trg_native_campaigns_upd BEFORE UPDATE ON native_campaigns
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE INDEX IF NOT EXISTS native_campaigns_task_idx
+  ON native_campaigns(task_id, id DESC);
+
+CREATE INDEX IF NOT EXISTS native_campaigns_state_idx
+  ON native_campaigns(task_id, state, desired_state);
+
+-- ---------------------------------------------------------------------------
+-- Attempt. native_run_id and runtime_run_id are the same actual run in the
+-- current ledger (reverse_native_runs.run_id is reverse_runtime_runs.id), so
+-- equality is enforced explicitly instead of trusting two independent lookups.
+-- resource_hold is the single persistent worker slot; terminal state alone is
+-- never enough to release it.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS native_campaign_attempts (
+  id bigserial PRIMARY KEY,
+  task_id bigint NOT NULL,
+  campaign_id bigint NOT NULL,
+  attempt_no integer NOT NULL CHECK (attempt_no BETWEEN 1 AND 1000),
+  native_run_id bigint NOT NULL,
+  runtime_run_id bigint NOT NULL,
+  worker_slot text NOT NULL DEFAULT 'local-afl-1' CHECK (worker_slot = 'local-afl-1'),
+  lease_owner text NOT NULL DEFAULT 'local-afl-1' CHECK (lease_owner = worker_slot),
+  lease_instance text NOT NULL CHECK (length(lease_instance) BETWEEN 1 AND 128),
+  fencing_token bigint NOT NULL DEFAULT nextval('native_campaign_fence_seq'),
+  lease_expires_at timestamptz NOT NULL,
+  state text NOT NULL DEFAULT 'claimed' CHECK (state IN
+    ('claimed','launching','running','stopping','collecting','cleaning',
+     'paused','completed','failed','cancelled','interrupted')),
+  phase text NOT NULL DEFAULT 'preflight' CHECK (phase IN
+    ('preflight','startup','tool_probe','instrumentation_probe','campaign',
+     'pause_collect','checkpoint_write','cleanup','evidence','finalize')),
+  reserved_budget_ms bigint NOT NULL CHECK (reserved_budget_ms BETWEEN 6000 AND 900000),
+  charged_budget_ms bigint NOT NULL DEFAULT 0
+    CHECK (charged_budget_ms >= 0 AND charged_budget_ms <= reserved_budget_ms),
+  operator_kind text NOT NULL DEFAULT 'admin'
+    CHECK (operator_kind IN ('admin','intent')),
+  operator_id bigint NOT NULL DEFAULT 0 CHECK (operator_id >= 0),
+  started_at timestamptz,
+  ended_at timestamptz,
+  termination_reason text CHECK (termination_reason IS NULL OR length(termination_reason) <= 128),
+  cleanup_status text NOT NULL DEFAULT 'pending'
+    CHECK (cleanup_status IN ('not_required','pending','verified','unknown','failed')),
+  resource_hold boolean NOT NULL DEFAULT true,
+  hold_reason text DEFAULT 'active'
+    CHECK (hold_reason IS NULL OR hold_reason IN
+      ('active','pending','cleanup_unknown','cleanup_failed')),
+  actual_elapsed_ms bigint NOT NULL DEFAULT 0 CHECK (actual_elapsed_ms >= 0),
+  cleanup_overrun_ms bigint NOT NULL DEFAULT 0 CHECK (cleanup_overrun_ms >= 0),
+  checkpoint_id bigint,
+  evidence_manifest_id bigint,
+  owned_resources jsonb NOT NULL DEFAULT '{}',
+  budget_overrun boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (native_run_id = runtime_run_id),
+  CHECK (lease_owner = worker_slot),
+  CHECK (jsonb_typeof(owned_resources) = 'object'
+     AND octet_length(owned_resources::text) <= 16384),
+  CHECK ((operator_kind = 'admin' AND operator_id = 0)
+      OR (operator_kind = 'intent' AND operator_id > 0)),
+  CHECK (state <> 'completed' OR cleanup_status = 'verified'),
+  CHECK (state <> 'cancelled' OR cleanup_status IN ('verified','not_required')),
+  CHECK (state <> 'paused' OR (checkpoint_id IS NOT NULL AND cleanup_status = 'verified')),
+  -- Active Attempts always hold the slot.
+  CHECK (state NOT IN
+      ('claimed','launching','running','stopping','collecting','cleaning')
+      OR resource_hold),
+  -- A clean pause/complete/cancel has already released the slot.
+  CHECK (state NOT IN ('paused','completed','cancelled') OR resource_hold = false),
+  -- pending/unknown/failed cleanup always keeps the slot; only verified or
+  -- not-required (never created resources) may release it.
+  CHECK (resource_hold OR cleanup_status IN ('not_required','verified')),
+  CHECK (resource_hold OR hold_reason IS NULL),
+  CHECK (NOT resource_hold OR hold_reason IS NOT NULL),
+  UNIQUE (campaign_id, attempt_no),
+  UNIQUE (native_run_id),
+  UNIQUE (runtime_run_id),
+  UNIQUE (id, campaign_id),
+  UNIQUE (id, campaign_id, task_id),
+  UNIQUE (id, task_id),
+  FOREIGN KEY (campaign_id, task_id)
+    REFERENCES native_campaigns(id, task_id) ON DELETE CASCADE,
+  FOREIGN KEY (native_run_id, task_id)
+    REFERENCES reverse_native_runs(run_id, task_id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
+  FOREIGN KEY (runtime_run_id, task_id)
+    REFERENCES reverse_runtime_runs(id, task_id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED
+);
+
+DROP TRIGGER IF EXISTS trg_native_campaign_attempts_upd ON native_campaign_attempts;
+
+CREATE TRIGGER trg_native_campaign_attempts_upd BEFORE UPDATE ON native_campaign_attempts
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_native_campaign_active_attempt
+  ON native_campaign_attempts(campaign_id)
+  WHERE state IN ('claimed','launching','running','stopping','collecting','cleaning');
+
+-- Active and terminal-but-unconfirmed rows share one global worker slot. The
+-- predicate is resource_hold, never an active-state list.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_native_campaign_resource_slot
+  ON native_campaign_attempts(worker_slot)
+  WHERE resource_hold;
+
+CREATE INDEX IF NOT EXISTS native_campaign_attempts_campaign_idx
+  ON native_campaign_attempts(campaign_id, id DESC);
+
+CREATE INDEX IF NOT EXISTS native_campaign_attempts_resource_hold_idx
+  ON native_campaign_attempts(worker_slot, resource_hold);
+
+-- ---------------------------------------------------------------------------
+-- Content-addressed objects and immutable corpus manifests/entries.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS native_campaign_objects (
+  id bigserial PRIMARY KEY,
+  task_id bigint NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  sha256 text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+  length bigint NOT NULL CHECK (length BETWEEN 1 AND 4096),
+  storage_key text NOT NULL CHECK (length(storage_key) BETWEEN 1 AND 512),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (storage_key = 'tasks/' || task_id::text ||
+    '/reverse/campaigns/objects/sha256/' || substr(sha256,1,2) || '/' || sha256),
+  UNIQUE (task_id, sha256, length),
+  UNIQUE (id, task_id),
+  UNIQUE (id, task_id, sha256, length, storage_key)
+);
+
+CREATE TABLE IF NOT EXISTS native_campaign_corpus_manifests (
+  id bigserial PRIMARY KEY,
+  task_id bigint NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  campaign_id bigint NOT NULL,
+  attempt_id bigint NOT NULL,
+  format_version integer NOT NULL DEFAULT 1 CHECK (format_version = 1),
+  manifest_sha256 text NOT NULL CHECK (manifest_sha256 ~ '^[0-9a-f]{64}$'),
+  entry_count integer NOT NULL DEFAULT 1 CHECK (entry_count BETWEEN 1 AND 512),
+  total_bytes bigint NOT NULL DEFAULT 1 CHECK (total_bytes BETWEEN 1 AND 1048576),
+  truncated boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (attempt_id, manifest_sha256),
+  UNIQUE (id, task_id),
+  UNIQUE (id, campaign_id, task_id),
+  UNIQUE (id, attempt_id, campaign_id, task_id),
+  FOREIGN KEY (campaign_id, task_id)
+    REFERENCES native_campaigns(id, task_id) ON DELETE CASCADE,
+  FOREIGN KEY (attempt_id, campaign_id, task_id)
+    REFERENCES native_campaign_attempts(id, campaign_id, task_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS native_campaign_corpus_entries (
+  id bigserial PRIMARY KEY,
+  task_id bigint NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  manifest_id bigint NOT NULL,
+  ordinal integer NOT NULL CHECK (ordinal BETWEEN 0 AND 511),
+  object_id bigint NOT NULL,
+  sha256 text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+  length bigint NOT NULL CHECK (length BETWEEN 1 AND 4096),
+  storage_key text NOT NULL CHECK (length(storage_key) BETWEEN 1 AND 512),
+  source_type text NOT NULL CHECK (source_type IN ('seed','queue','crash','import')),
+  source_ref text NOT NULL DEFAULT '' CHECK (length(source_ref) <= 256),
+  UNIQUE (manifest_id, ordinal),
+  UNIQUE (id, task_id),
+  FOREIGN KEY (manifest_id, task_id)
+    REFERENCES native_campaign_corpus_manifests(id, task_id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
+  -- The entry snapshot must match the object's task/hash/length/storage key.
+  -- NO ACTION DEFERRED allows a whole-task cascade while still rejecting an
+  -- individual object delete or identity rewrite that would orphan a snapshot.
+  FOREIGN KEY (object_id, task_id, sha256, length, storage_key)
+    REFERENCES native_campaign_objects(id, task_id, sha256, length, storage_key)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE TABLE IF NOT EXISTS native_campaign_checkpoints (
+  id bigserial PRIMARY KEY,
+  task_id bigint NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  campaign_id bigint NOT NULL,
+  attempt_id bigint NOT NULL,
+  manifest_id bigint NOT NULL,
+  state text NOT NULL DEFAULT 'staging'
+    CHECK (state IN ('staging','persisted','verified','failed')),
+  format_version integer NOT NULL DEFAULT 1 CHECK (format_version = 1),
+  entry_count integer NOT NULL DEFAULT 1 CHECK (entry_count BETWEEN 1 AND 512),
+  total_bytes bigint NOT NULL DEFAULT 1 CHECK (total_bytes BETWEEN 1 AND 1048576),
+  truncated boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  verified_at timestamptz,
+  CHECK ((state = 'verified') = (verified_at IS NOT NULL)),
+  UNIQUE (attempt_id),
+  UNIQUE (manifest_id),
+  UNIQUE (id, campaign_id),
+  UNIQUE (id, task_id, campaign_id),
+  UNIQUE (id, attempt_id, campaign_id),
+  UNIQUE (id, attempt_id, campaign_id, task_id),
+  FOREIGN KEY (campaign_id, task_id)
+    REFERENCES native_campaigns(id, task_id) ON DELETE CASCADE,
+  FOREIGN KEY (attempt_id, campaign_id, task_id)
+    REFERENCES native_campaign_attempts(id, campaign_id, task_id) ON DELETE CASCADE,
+  FOREIGN KEY (manifest_id, attempt_id, campaign_id, task_id)
+    REFERENCES native_campaign_corpus_manifests(id, attempt_id, campaign_id, task_id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE INDEX IF NOT EXISTS native_campaign_checkpoints_campaign_idx
+  ON native_campaign_checkpoints(campaign_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS native_campaign_evidence (
+  id bigserial PRIMARY KEY,
+  task_id bigint NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  campaign_id bigint NOT NULL,
+  attempt_id bigint NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('attempt_final','checkpoint','pause','cancel','interrupt')),
+  operation text NOT NULL DEFAULT 'native_campaign' CHECK (operation = 'native_campaign'),
+  authority text NOT NULL DEFAULT 'candidate-only' CHECK (authority = 'candidate-only'),
+  result_path text NOT NULL CHECK (length(result_path) BETWEEN 1 AND 512),
+  sha256 text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+  observation jsonb NOT NULL,
+  truncated boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (jsonb_typeof(observation) = 'object'
+     AND octet_length(observation::text) <= 262144),
+  UNIQUE (attempt_id, kind),
+  UNIQUE (id, campaign_id),
+  UNIQUE (id, task_id, campaign_id, attempt_id),
+  UNIQUE (id, attempt_id, campaign_id, task_id),
+  FOREIGN KEY (campaign_id, task_id)
+    REFERENCES native_campaigns(id, task_id) ON DELETE CASCADE,
+  FOREIGN KEY (attempt_id, campaign_id, task_id)
+    REFERENCES native_campaign_attempts(id, campaign_id, task_id) ON DELETE CASCADE
+);
+
+-- ---------------------------------------------------------------------------
+-- Idempotent request snapshots and append-only events.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS native_campaign_requests (
+  id bigserial PRIMARY KEY,
+  task_id bigint NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  campaign_id bigint,
+  request_id text NOT NULL CHECK (request_id ~ '^[ -~]{1,128}$'),
+  action text NOT NULL CHECK (action IN
+    ('create','validate','start','status','list','pause','cancel','resume','export_manifest')),
+  request_hash text NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
+  response_status integer NOT NULL CHECK (response_status BETWEEN 200 AND 499),
+  response_body jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (jsonb_typeof(response_body) = 'object'
+     AND octet_length(response_body::text) <= 65536),
+  UNIQUE (task_id, request_id),
+  FOREIGN KEY (campaign_id, task_id)
+    REFERENCES native_campaigns(id, task_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS native_campaign_events (
+  id bigserial PRIMARY KEY,
+  task_id bigint NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  campaign_id bigint NOT NULL,
+  attempt_id bigint,
+  kind text NOT NULL CHECK (length(kind) BETWEEN 1 AND 64),
+  payload jsonb NOT NULL DEFAULT '{}',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (jsonb_typeof(payload) = 'object'
+     AND octet_length(payload::text) <= 16384),
+  FOREIGN KEY (campaign_id, task_id)
+    REFERENCES native_campaigns(id, task_id) ON DELETE CASCADE,
+  FOREIGN KEY (attempt_id, campaign_id, task_id)
+    REFERENCES native_campaign_attempts(id, campaign_id, task_id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE INDEX IF NOT EXISTS native_campaign_events_campaign_idx
+  ON native_campaign_events(campaign_id, id DESC);
+
+-- ---------------------------------------------------------------------------
+-- Cyclic pointers are added after both sides exist. NO ACTION DEFERRED keeps
+-- individual deletes unsafe while allowing a single task deletion to remove
+-- both sides atomically (and avoids PostgreSQL 15-only SET NULL (column)).
+-- ---------------------------------------------------------------------------
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                 WHERE conname='native_campaigns_current_attempt_fk'
+                   AND conrelid='native_campaigns'::regclass) THEN
+    ALTER TABLE native_campaigns ADD CONSTRAINT native_campaigns_current_attempt_fk
+      FOREIGN KEY (current_attempt_id, id)
+      REFERENCES native_campaign_attempts(id, campaign_id)
+      ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                 WHERE conname='native_campaigns_latest_checkpoint_fk'
+                   AND conrelid='native_campaigns'::regclass) THEN
+    ALTER TABLE native_campaigns ADD CONSTRAINT native_campaigns_latest_checkpoint_fk
+      FOREIGN KEY (latest_checkpoint_id, id)
+      REFERENCES native_campaign_checkpoints(id, campaign_id)
+      ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                 WHERE conname='native_campaign_attempts_checkpoint_fk'
+                   AND conrelid='native_campaign_attempts'::regclass) THEN
+    ALTER TABLE native_campaign_attempts ADD CONSTRAINT native_campaign_attempts_checkpoint_fk
+      FOREIGN KEY (checkpoint_id, id, campaign_id, task_id)
+      REFERENCES native_campaign_checkpoints(id, attempt_id, campaign_id, task_id)
+      ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                 WHERE conname='native_campaign_attempts_evidence_fk'
+                   AND conrelid='native_campaign_attempts'::regclass) THEN
+    ALTER TABLE native_campaign_attempts ADD CONSTRAINT native_campaign_attempts_evidence_fk
+      FOREIGN KEY (evidence_manifest_id, id, campaign_id, task_id)
+      REFERENCES native_campaign_evidence(id, attempt_id, campaign_id, task_id)
+      ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- Guards. Application code still uses relative charged updates and explicit
+-- ownership checks; these triggers are the final database boundary.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION native_campaign_charge_guard() RETURNS trigger AS $$
+BEGIN
+  IF NEW.charged_budget_ms < OLD.charged_budget_ms THEN
+    RAISE EXCEPTION 'charged_budget_ms must not decrease';
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaigns_charge_guard ON native_campaigns;
+
+CREATE TRIGGER trg_native_campaigns_charge_guard
+  BEFORE UPDATE OF charged_budget_ms ON native_campaigns
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_charge_guard();
+
+DROP TRIGGER IF EXISTS trg_native_campaign_attempts_charge_guard ON native_campaign_attempts;
+
+CREATE TRIGGER trg_native_campaign_attempts_charge_guard
+  BEFORE UPDATE OF charged_budget_ms ON native_campaign_attempts
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_charge_guard();
+
+CREATE OR REPLACE FUNCTION native_campaign_identity_guard() RETURNS trigger AS $$
+BEGIN
+  IF OLD.task_id IS DISTINCT FROM NEW.task_id
+     OR OLD.artifact_id IS DISTINCT FROM NEW.artifact_id
+     OR OLD.creator_kind IS DISTINCT FROM NEW.creator_kind
+     OR OLD.creator_id IS DISTINCT FROM NEW.creator_id
+     OR OLD.spec_version IS DISTINCT FROM NEW.spec_version
+     OR OLD.spec IS DISTINCT FROM NEW.spec
+     OR OLD.spec_hash IS DISTINCT FROM NEW.spec_hash
+     OR OLD.artifact_sha256 IS DISTINCT FROM NEW.artifact_sha256
+     OR OLD.profile_id IS DISTINCT FROM NEW.profile_id
+     OR OLD.image_digest IS DISTINCT FROM NEW.image_digest
+     OR OLD.policy_revision IS DISTINCT FROM NEW.policy_revision
+     OR OLD.config_revision IS DISTINCT FROM NEW.config_revision
+     OR OLD.total_budget_ms IS DISTINCT FROM NEW.total_budget_ms
+     OR OLD.created_at IS DISTINCT FROM NEW.created_at THEN
+    RAISE EXCEPTION 'native campaign identity and authorized budget are immutable';
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaigns_identity_guard ON native_campaigns;
+
+CREATE TRIGGER trg_native_campaigns_identity_guard
+  BEFORE UPDATE ON native_campaigns
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_identity_guard();
+
+-- Transition rules remain immediate even when a restore defers target checks.
+CREATE OR REPLACE FUNCTION native_campaigns_pointer_guard() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    IF OLD.current_attempt_id IS NOT NULL AND NEW.current_attempt_id IS NULL THEN
+      RAISE EXCEPTION 'native_campaigns.current_attempt_id cannot be cleared';
+    END IF;
+    IF OLD.latest_checkpoint_id IS NOT NULL AND NEW.latest_checkpoint_id IS NULL THEN
+      RAISE EXCEPTION 'native_campaigns.latest_checkpoint_id cannot be cleared';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaigns_pointer_guard ON native_campaigns;
+
+CREATE TRIGGER trg_native_campaigns_pointer_guard
+  BEFORE INSERT OR UPDATE ON native_campaigns
+  FOR EACH ROW EXECUTE FUNCTION native_campaigns_pointer_guard();
+
+CREATE OR REPLACE FUNCTION native_campaigns_pointer_targets() RETURNS trigger AS $$
+DECLARE current_row native_campaigns%ROWTYPE;
+BEGIN
+  -- Deferred events may carry an earlier version. Validate the final row by
+  -- immutable identity; a row deleted in the same transaction has no pointers.
+  SELECT * INTO current_row FROM native_campaigns WHERE id=NEW.id AND task_id=NEW.task_id;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  IF current_row.latest_checkpoint_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM native_campaign_checkpoints c WHERE c.id=current_row.latest_checkpoint_id
+      AND c.campaign_id=current_row.id AND c.task_id=current_row.task_id AND c.state='verified') THEN
+    RAISE EXCEPTION 'latest_checkpoint_id must reference a verified checkpoint of this campaign';
+  END IF;
+  IF current_row.current_attempt_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM native_campaign_attempts a WHERE a.id=current_row.current_attempt_id
+      AND a.campaign_id=current_row.id AND a.task_id=current_row.task_id) THEN
+    RAISE EXCEPTION 'current_attempt_id must reference an attempt of this campaign';
+  END IF;
+  RETURN NULL;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS native_campaigns_pointer_targets_check ON native_campaigns;
+
+CREATE CONSTRAINT TRIGGER native_campaigns_pointer_targets_check
+  AFTER INSERT OR UPDATE ON native_campaigns DEFERRABLE INITIALLY IMMEDIATE
+  FOR EACH ROW EXECUTE FUNCTION native_campaigns_pointer_targets();
+
+CREATE OR REPLACE FUNCTION native_campaign_attempt_identity_guard() RETURNS trigger AS $$
+BEGIN
+  IF OLD.task_id IS DISTINCT FROM NEW.task_id
+     OR OLD.campaign_id IS DISTINCT FROM NEW.campaign_id
+     OR OLD.attempt_no IS DISTINCT FROM NEW.attempt_no
+     OR OLD.native_run_id IS DISTINCT FROM NEW.native_run_id
+     OR OLD.runtime_run_id IS DISTINCT FROM NEW.runtime_run_id
+     OR OLD.worker_slot IS DISTINCT FROM NEW.worker_slot
+     OR OLD.lease_owner IS DISTINCT FROM NEW.lease_owner
+     OR OLD.fencing_token IS DISTINCT FROM NEW.fencing_token
+     OR OLD.reserved_budget_ms IS DISTINCT FROM NEW.reserved_budget_ms
+     OR OLD.operator_kind IS DISTINCT FROM NEW.operator_kind
+     OR OLD.operator_id IS DISTINCT FROM NEW.operator_id
+     OR OLD.created_at IS DISTINCT FROM NEW.created_at THEN
+    RAISE EXCEPTION 'campaign attempt identity and reservation are immutable';
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaign_attempt_identity_guard ON native_campaign_attempts;
+
+CREATE TRIGGER trg_native_campaign_attempt_identity_guard
+  BEFORE UPDATE ON native_campaign_attempts
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_attempt_identity_guard();
+
+CREATE OR REPLACE FUNCTION native_campaign_attempt_pointer_guard() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP='UPDATE' THEN
+    IF OLD.checkpoint_id IS NOT NULL AND NEW.checkpoint_id IS DISTINCT FROM OLD.checkpoint_id THEN
+      RAISE EXCEPTION 'native_campaign_attempts.checkpoint_id is immutable once set';
+    END IF;
+    IF OLD.evidence_manifest_id IS NOT NULL AND NEW.evidence_manifest_id IS DISTINCT FROM OLD.evidence_manifest_id THEN
+      RAISE EXCEPTION 'native_campaign_attempts.evidence_manifest_id is immutable once set';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaign_attempt_pointer_guard ON native_campaign_attempts;
+
+CREATE TRIGGER trg_native_campaign_attempt_pointer_guard
+  BEFORE INSERT OR UPDATE ON native_campaign_attempts
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_attempt_pointer_guard();
+
+CREATE OR REPLACE FUNCTION native_campaign_attempt_pointer_targets() RETURNS trigger AS $$
+DECLARE current_row native_campaign_attempts%ROWTYPE;
+BEGIN
+  SELECT * INTO current_row FROM native_campaign_attempts
+    WHERE id=NEW.id AND task_id=NEW.task_id AND campaign_id=NEW.campaign_id;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  IF current_row.checkpoint_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM native_campaign_checkpoints c WHERE c.id=current_row.checkpoint_id
+      AND c.attempt_id=current_row.id AND c.campaign_id=current_row.campaign_id
+      AND c.task_id=current_row.task_id AND c.state='verified') THEN
+    RAISE EXCEPTION 'attempt checkpoint must be verified and belong to this attempt';
+  END IF;
+  IF current_row.evidence_manifest_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM native_campaign_evidence e WHERE e.id=current_row.evidence_manifest_id
+      AND e.attempt_id=current_row.id AND e.campaign_id=current_row.campaign_id AND e.task_id=current_row.task_id) THEN
+    RAISE EXCEPTION 'attempt evidence must belong to this attempt';
+  END IF;
+  RETURN NULL;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS native_campaign_attempt_pointer_targets_check ON native_campaign_attempts;
+
+CREATE CONSTRAINT TRIGGER native_campaign_attempt_pointer_targets_check
+  AFTER INSERT OR UPDATE ON native_campaign_attempts DEFERRABLE INITIALLY IMMEDIATE
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_attempt_pointer_targets();
+
+CREATE OR REPLACE FUNCTION native_campaign_attempt_mode_guard() RETURNS trigger AS $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM reverse_native_runs n
+    WHERE n.run_id = NEW.native_run_id AND n.task_id = NEW.task_id
+      AND n.mode = 'campaign') THEN
+    RAISE EXCEPTION 'campaign attempt requires a campaign-mode native run in the same task';
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaign_attempt_mode ON native_campaign_attempts;
+
+CREATE TRIGGER trg_native_campaign_attempt_mode
+  BEFORE INSERT OR UPDATE OF native_run_id, task_id, campaign_id
+  ON native_campaign_attempts
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_attempt_mode_guard();
+
+CREATE OR REPLACE FUNCTION native_campaign_object_immutable() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'campaign corpus objects are immutable';
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaign_object_immutable ON native_campaign_objects;
+
+CREATE TRIGGER trg_native_campaign_object_immutable
+  BEFORE UPDATE ON native_campaign_objects
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_object_immutable();
+
+CREATE OR REPLACE FUNCTION native_campaign_manifest_immutable() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'campaign corpus manifests are immutable';
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaign_manifest_immutable ON native_campaign_corpus_manifests;
+
+CREATE TRIGGER trg_native_campaign_manifest_immutable
+  BEFORE UPDATE ON native_campaign_corpus_manifests
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_manifest_immutable();
+
+CREATE OR REPLACE FUNCTION native_campaign_entry_guard() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    RAISE EXCEPTION 'campaign corpus entries are immutable';
+  END IF;
+  IF EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+       AND NOT native_campaign_compaction_authorized(OLD.task_id) THEN
+    RAISE EXCEPTION 'campaign corpus entries are immutable outside task deletion';
+  END IF;
+  RETURN OLD;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaign_entry_guard ON native_campaign_corpus_entries;
+
+CREATE TRIGGER trg_native_campaign_entry_guard
+  BEFORE UPDATE OR DELETE ON native_campaign_corpus_entries
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_entry_guard();
+
+-- A manifest is derived from its entries. The check is deferred so the model
+-- can insert the manifest and its entries in one transaction; any committed
+-- manifest whose count/bytes disagree with the entries is rejected.
+CREATE OR REPLACE FUNCTION native_campaign_manifest_derived_check() RETURNS trigger AS $$
+DECLARE actual_count integer; actual_bytes bigint;
+BEGIN
+  SELECT count(*), COALESCE(sum(length),0) INTO actual_count, actual_bytes
+  FROM native_campaign_corpus_entries
+  WHERE manifest_id = NEW.id AND task_id = NEW.task_id;
+  IF actual_count <> NEW.entry_count OR actual_bytes <> NEW.total_bytes THEN
+    RAISE EXCEPTION 'manifest entry_count/total_bytes do not match its entries';
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaign_manifest_derived ON native_campaign_corpus_manifests;
+
+CREATE CONSTRAINT TRIGGER trg_native_campaign_manifest_derived
+  AFTER INSERT ON native_campaign_corpus_manifests
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_manifest_derived_check();
+
+-- Checkpoints are projections of the manifest; reject a checkpoint whose
+-- counts do not match the referenced manifest even when inserted by SQL.
+CREATE OR REPLACE FUNCTION native_campaign_checkpoint_manifest_guard() RETURNS trigger AS $$
+DECLARE m_count integer; m_bytes bigint; m_trunc boolean;
+BEGIN
+  SELECT entry_count, total_bytes, truncated
+  INTO m_count, m_bytes, m_trunc
+  FROM native_campaign_corpus_manifests
+  WHERE id = NEW.manifest_id AND task_id = NEW.task_id
+    AND campaign_id = NEW.campaign_id AND attempt_id = NEW.attempt_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'checkpoint manifest does not belong to the same campaign attempt';
+  END IF;
+  IF m_count <> NEW.entry_count OR m_bytes <> NEW.total_bytes
+     OR m_trunc <> NEW.truncated THEN
+    RAISE EXCEPTION 'checkpoint counts do not match its derived manifest';
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaign_checkpoint_manifest ON native_campaign_checkpoints;
+
+CREATE TRIGGER trg_native_campaign_checkpoint_manifest
+  BEFORE INSERT ON native_campaign_checkpoints
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_checkpoint_manifest_guard();
+
+CREATE OR REPLACE FUNCTION native_campaign_checkpoint_guard() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF OLD.state IN ('persisted','verified')
+       AND EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+       AND NOT native_campaign_compaction_authorized(OLD.task_id) THEN
+      RAISE EXCEPTION 'persisted campaign checkpoint cannot be deleted outside task deletion';
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF OLD.task_id IS DISTINCT FROM NEW.task_id
+     OR OLD.campaign_id IS DISTINCT FROM NEW.campaign_id
+     OR OLD.attempt_id IS DISTINCT FROM NEW.attempt_id
+     OR OLD.manifest_id IS DISTINCT FROM NEW.manifest_id
+     OR OLD.format_version IS DISTINCT FROM NEW.format_version
+     OR OLD.entry_count IS DISTINCT FROM NEW.entry_count
+     OR OLD.total_bytes IS DISTINCT FROM NEW.total_bytes
+     OR OLD.truncated IS DISTINCT FROM NEW.truncated
+     OR OLD.created_at IS DISTINCT FROM NEW.created_at THEN
+    RAISE EXCEPTION 'campaign checkpoint identity is immutable';
+  END IF;
+  IF OLD.state = 'verified' THEN
+    RAISE EXCEPTION 'verified campaign checkpoint is immutable';
+  END IF;
+  IF OLD.state = 'failed' THEN
+    RAISE EXCEPTION 'failed campaign checkpoint is terminal';
+  END IF;
+  IF OLD.state = 'staging'
+     AND NEW.state NOT IN ('staging','persisted','verified','failed') THEN
+    RAISE EXCEPTION 'invalid campaign checkpoint transition';
+  END IF;
+  IF OLD.state = 'persisted'
+     AND NEW.state NOT IN ('persisted','verified','failed') THEN
+    RAISE EXCEPTION 'invalid campaign checkpoint transition';
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaign_checkpoint_guard ON native_campaign_checkpoints;
+
+CREATE TRIGGER trg_native_campaign_checkpoint_guard
+  BEFORE UPDATE OR DELETE ON native_campaign_checkpoints
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_checkpoint_guard();
+
+CREATE OR REPLACE FUNCTION native_campaign_evidence_guard() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+       AND NOT native_campaign_compaction_authorized(OLD.task_id) THEN
+      RAISE EXCEPTION 'campaign evidence is immutable outside task deletion';
+    END IF;
+    RETURN OLD;
+  END IF;
+  RAISE EXCEPTION 'campaign evidence is immutable';
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaign_evidence_guard ON native_campaign_evidence;
+
+CREATE TRIGGER trg_native_campaign_evidence_guard
+  BEFORE UPDATE OR DELETE ON native_campaign_evidence
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_evidence_guard();
+
+CREATE OR REPLACE FUNCTION native_campaign_event_guard() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    RAISE EXCEPTION 'campaign events are append-only';
+  END IF;
+  IF EXISTS (SELECT 1 FROM tasks WHERE id = OLD.task_id)
+       AND NOT native_campaign_compaction_authorized(OLD.task_id) THEN
+    RAISE EXCEPTION 'campaign events are append-only outside task deletion';
+  END IF;
+  RETURN OLD;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaign_event_guard ON native_campaign_events;
+
+CREATE TRIGGER trg_native_campaign_event_guard
+  BEFORE UPDATE OR DELETE ON native_campaign_events
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_event_guard();
+
+-- No delete path may remove a resource-holding Attempt: direct Attempt delete,
+-- Campaign cascade, task cascade, or any other parent cascade. This is checked
+-- immediately, before deferred ownership FKs can be relaxed with
+-- SET CONSTRAINTS ALL IMMEDIATE. A cleanup-confirmed row (resource_hold=false)
+-- remains deletable, so the legacy whole-task cleanup keeps working.
+CREATE OR REPLACE FUNCTION native_campaign_attempt_delete_guard() RETURNS trigger AS $$
+BEGIN
+  IF OLD.resource_hold THEN
+    RAISE EXCEPTION 'campaign attempt still holds resources; confirm cleanup before deletion';
+  END IF;
+  RETURN OLD;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaign_attempt_delete_guard ON native_campaign_attempts;
+
+CREATE TRIGGER trg_native_campaign_attempt_delete_guard
+  BEFORE DELETE ON native_campaign_attempts
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_attempt_delete_guard();
+
+-- A task with a resource-holding Attempt cannot silently disappear. Once the
+-- cleanup is confirmed (resource_hold=false) the legacy DeleteTask cascade is
+-- allowed to remove the task and all Campaign records atomically.
+CREATE OR REPLACE FUNCTION native_campaign_task_delete_guard() RETURNS trigger AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM native_campaign_attempts
+    WHERE task_id = OLD.id AND resource_hold) THEN
+    RAISE EXCEPTION 'task has a campaign attempt holding resources; confirm cleanup before deletion';
+  END IF;
+  RETURN OLD;
+END $$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_native_campaign_task_delete_guard ON tasks;
+
+CREATE TRIGGER trg_native_campaign_task_delete_guard
+  BEFORE DELETE ON tasks
+  FOR EACH ROW EXECUTE FUNCTION native_campaign_task_delete_guard();
+
+-- This is a trusted service transaction boundary, not a database-role security
+-- boundary. DeleteTask may remove campaign records only when nothing holds the worker
+-- slot and no campaign is still running; the reference tree additionally requires an
+-- in-flight task_archives v6 compaction, which this tree does not implement yet.
+CREATE OR REPLACE FUNCTION native_campaign_compaction_authorized(p_task_id bigint) RETURNS boolean AS $$
+ SELECT EXISTS (
+   SELECT 1 FROM task_archives a JOIN tasks t ON t.id=a.task_id
+   WHERE a.task_id=p_task_id AND a.state='archiving' AND a.phase='database_compacting'
+     AND a.format_version=6 AND a.compaction_txid=txid_current()
+     AND t.archived_at IS NULL AND t.deleted_at IS NULL
+ ) AND NOT EXISTS (
+   SELECT 1 FROM native_campaign_attempts x WHERE x.task_id=p_task_id
+     AND (x.resource_hold OR x.state IN ('claimed','launching','running','stopping','collecting','cleaning'))
+ ) AND NOT EXISTS (
+   SELECT 1 FROM native_campaigns c WHERE c.task_id=p_task_id AND c.state IN ('running','stopping')
+ );
+$$ LANGUAGE sql VOLATILE;

@@ -402,6 +402,9 @@ func TestSideTaskArchiveVersions(t *testing.T) {
 				t.Fatal(err)
 			}
 			archive.FormatVersion = version
+			if version < TaskArchiveFormatVersion {
+				stripNativeCampaignArchiveTables(archive)
+			}
 			if version < 3 {
 				delete(archive.Tables, "side_question_sessions")
 				delete(archive.Tables, "side_question_requests")

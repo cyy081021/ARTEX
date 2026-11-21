@@ -88,6 +88,11 @@ import type {
   ReverseArtifact,
   ReverseConclusion,
   ReverseReadiness,
+  TaskFlag,
+  TaskFlagRow,
+  CampaignRow,
+  CampaignAttemptRow,
+  CampaignCheckpointRow,
   ReverseRuntimeProfile,
   ReverseRuntimePolicy,
   ReverseRuntimeRun,
@@ -276,6 +281,9 @@ return {
   task: (id: string) => get<Task>(`/tasks/${encodeURIComponent(id)}`),
   createTask: (input: {
     kind?: TaskKind;
+    // mode is orthogonal to kind: "normal" keeps the product default, "ctf" adds
+    // the competition overlay (time box, route switching, flag-first acceptance).
+    mode?: "normal" | "ctf";
     name?: string;
     categoryId?: number;
     description: string;
@@ -293,6 +301,7 @@ return {
     post<Task | { task: Task; route: TaskRoute }>("/tasks", {
       name: input.name ?? "",
       kind: input.kind ?? "pentest",
+      mode: input.mode ?? "normal",
       workflow_version: 1,
       category_id: input.categoryId ?? null,
       description: input.description,
@@ -447,6 +456,33 @@ return {
     patch<TaskGoal>(`/tasks/${id}/goals/${goalId}`, { text, vulnclass: vulnclass ?? "" }),
   // 人工删除目标（硬删除）：通知 planner，删除不复活任务。
   deleteGoal: (id: string, goalId: string) => del<{ ok: boolean }>(`/tasks/${id}/goals/${goalId}`),
+
+  // ---- CTF 模式 flag 台账 ----
+  // 比赛任务的唯一交付物：agent 用 submit_flag 记账，运维也可以在界面上手工补记。
+  taskFlags: (id: string) =>
+    get<{ count: number; flags: TaskFlag[] | null }>(`/tasks/${id}/flags`).then((response) => ({
+      count: response.count ?? 0,
+      flags: arr(response.flags),
+    })),
+  addTaskFlag: (id: string, input: { flag: string; source?: string; note?: string }) =>
+    post<{ flag: TaskFlag; first_capture: boolean; duplicate: boolean }>(`/tasks/${id}/flags`, input),
+  // 跨任务看板：比赛里多个题任务同时跑，需要一处分页列出全部已捕获 flag。
+  allFlags: (limit = 200) =>
+    get<{ count: number; flags: TaskFlagRow[] | null }>(`/flags?limit=${limit}`).then((response) => ({
+      count: response.count ?? 0,
+      flags: arr(response.flags),
+    })),
+  // ---- native 模糊测试战役（campaign）----
+  taskCampaigns: (id: string, limit = 50) =>
+    get<{ campaigns: CampaignRow[] | null }>(`/tasks/${id}/reverse/native/campaigns?limit=${limit}`).then((response) => arr(response.campaigns)),
+  campaignAttempts: (id: string, campaignId: number, limit = 50) =>
+    get<{ attempts: CampaignAttemptRow[] | null }>(
+      `/tasks/${id}/reverse/native/campaigns/${campaignId}/attempts?limit=${limit}`,
+    ).then((response) => arr(response.attempts)),
+  campaignCheckpoints: (id: string, campaignId: number, limit = 50) =>
+    get<{ checkpoints: CampaignCheckpointRow[] | null }>(
+      `/tasks/${id}/reverse/native/campaigns/${campaignId}/checkpoints?limit=${limit}`,
+    ).then((response) => arr(response.checkpoints)),
 
   // ---- 操作约束管理（总览）----
   // 本任务全部操作约束（allow/deny/rule）。
